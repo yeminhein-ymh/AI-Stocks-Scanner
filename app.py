@@ -19,19 +19,25 @@ st.set_page_config(page_title="Axiom AI Research", page_icon="◈", layout="wide
 
 CSS = """
 <style>
-:root { --ink:#e8edf6; --muted:#8b98aa; --panel:#111923; --line:#263241; --cyan:#33d6c5; --amber:#ffbe55; }
-.stApp { background: radial-gradient(circle at 80% 0%, #162535 0, #091018 34%, #070c12 100%); color:var(--ink); }
-[data-testid="stSidebar"] { background:#091019; border-right:1px solid var(--line); }
-[data-testid="stMetric"] { background:linear-gradient(145deg,#111b26,#0c141d); border:1px solid var(--line); border-radius:10px; padding:14px; }
+:root { --ink:#243247; --muted:#62748a; --panel:#ffffff; --line:#d7e0ea; --teal:#087f72; --soft:#f4f7fb; }
+.stApp, [data-testid="stAppViewContainer"] { background:linear-gradient(180deg,#fbfcfe 0%,#f3f6fa 100%); color:var(--ink); }
+[data-testid="stHeader"] { background:rgba(251,252,254,.94); }
+[data-testid="stSidebar"] { background:#edf3f8; border-right:1px solid var(--line); }
+[data-testid="stSidebar"] * { color:#334155; }
+[data-testid="stMetric"] { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; box-shadow:0 3px 12px rgba(30,55,80,.05); }
 [data-testid="stMetricLabel"] { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:.7rem; }
+[data-testid="stMetricValue"] { color:#1f2f44; }
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp p, .stApp label { color:var(--ink); }
 .block-container { padding-top:1.5rem; max-width:1600px; }
-.eyebrow { color:var(--cyan); text-transform:uppercase; letter-spacing:.18em; font-size:.72rem; font-weight:700; }
-.hero { font-size:2rem; font-weight:700; margin:.15rem 0; }
+.eyebrow { color:var(--teal); text-transform:uppercase; letter-spacing:.18em; font-size:.72rem; font-weight:700; }
+.hero { color:#18273b; font-size:2rem; font-weight:700; margin:.15rem 0; }
 .subtle { color:var(--muted); font-size:.86rem; }
-.pill { display:inline-block; padding:.25rem .65rem; border-radius:999px; background:#15342f; color:#7ff2d5; border:1px solid #245848; font-size:.78rem; }
-.reason { padding:.45rem .6rem; margin:.25rem 0; border-left:2px solid var(--cyan); background:#0d1720; color:#c8d1dd; }
-.warningbox { background:#2c2112; border:1px solid #65491c; padding:.7rem; border-radius:8px; color:#ffd184; }
+.pill { display:inline-block; padding:.25rem .65rem; border-radius:999px; background:#e3f4ef; color:#07695f; border:1px solid #a9d9cf; font-size:.78rem; }
+.reason { padding:.55rem .7rem; margin:.3rem 0; border-left:3px solid var(--teal); background:#eef7f5; color:#31465b; border-radius:0 7px 7px 0; }
+.warningbox { background:#fff8e8; border:1px solid #ead5a0; padding:.7rem; border-radius:8px; color:#70561d; }
 .stTabs [data-baseweb="tab-list"] { gap:1.2rem; border-bottom:1px solid var(--line); }
+div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, textarea { background:#ffffff !important; color:#25364b !important; }
+div[data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -99,8 +105,8 @@ def probability_chart(a: Analysis) -> go.Figure:
     fig = go.Figure()
     fig.add_bar(name="Bull", x=horizons, y=[a.probabilities[h]["bull"] for h in horizons], marker_color="#20c997")
     fig.add_bar(name="Bear", x=horizons, y=[a.probabilities[h]["bear"] for h in horizons], marker_color="#ff6b6b")
-    fig.update_layout(barmode="group", height=310, margin=dict(l=10, r=10, t=25, b=10),
-                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    fig.update_layout(barmode="group", height=310, margin=dict(l=10, r=10, t=25, b=10), template="plotly_white",
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff",
                       yaxis_title="Modeled probability (%)", legend_orientation="h")
     return fig
 
@@ -112,7 +118,7 @@ def price_chart(prices: pd.DataFrame, title: str) -> go.Figure:
     for column, color in (("EMA20", "#60a5fa"), ("EMA50", "#f59e0b"), ("EMA200", "#a78bfa")):
         fig.add_scatter(x=df.index, y=df[column], name=column, line=dict(width=1.2, color=color))
     fig.update_layout(title=title, height=460, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=45, b=10),
-                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", legend_orientation="h")
+                      template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff", legend_orientation="h")
     return fig
 
 
@@ -215,8 +221,11 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
                         "Stage": a.trend_stage, "Stop": a.stop_loss, "Target 2": a.target_2})
     table = pd.DataFrame(records)
     st.subheader("Institutional ranking")
-    st.dataframe(table.style.background_gradient(subset=["AI Score", "Bull %", "Confidence %"], cmap="RdYlGn"),
-                 use_container_width=True, hide_index=True, height=min(680, 42 + 35 * len(table)))
+    st.dataframe(table, column_config={
+        "AI Score": st.column_config.ProgressColumn("AI Score", min_value=0, max_value=100, format="%.1f"),
+        "Bull %": st.column_config.ProgressColumn("Bull %", min_value=0, max_value=100, format="%.1f%%"),
+        "Confidence %": st.column_config.ProgressColumn("Confidence %", min_value=0, max_value=100, format="%.1f%%"),
+    }, use_container_width=True, hide_index=True, height=min(680, 42 + 35 * len(table)))
     export_cols = st.columns([1, 1, 5])
     export_cols[0].download_button("Export CSV", table.to_csv(index=False).encode(), "axiom_scanner.csv", "text/csv")
     workbook = excel_bytes(table)
@@ -271,14 +280,19 @@ def matrix_page(tickers: list[str], max_position: float, risk_per_trade: float) 
     matrix.insert(0, "Rank", range(1, len(matrix) + 1))
     c1, c2 = st.columns([1.5, 1])
     with c1:
-        st.dataframe(matrix.style.background_gradient(subset=["Overall", "Bull %", "Confidence %", "Momentum", "RS vs SPY"], cmap="RdYlGn"),
-                     use_container_width=True, hide_index=True, height=650)
+        st.dataframe(matrix, column_config={
+            "Overall": st.column_config.ProgressColumn("Overall", min_value=0, max_value=100, format="%.1f"),
+            "Bull %": st.column_config.ProgressColumn("Bull %", min_value=0, max_value=100, format="%.1f%%"),
+            "Confidence %": st.column_config.ProgressColumn("Confidence %", min_value=0, max_value=100, format="%.1f%%"),
+            "Momentum": st.column_config.ProgressColumn("Momentum", min_value=0, max_value=100, format="%.1f"),
+            "RS vs SPY": st.column_config.ProgressColumn("RS vs SPY", min_value=0, max_value=100, format="%.1f"),
+        }, use_container_width=True, hide_index=True, height=650)
     with c2:
         fig = go.Figure(go.Scatter(x=matrix["Expected Risk %"], y=matrix["Expected Return %"], mode="markers+text",
                                    text=matrix.Ticker, textposition="top center", marker=dict(size=matrix["Confidence %"] / 4,
                                    color=matrix["Overall"], colorscale="RdYlGn", showscale=True, colorbar_title="Score")))
         fig.update_layout(title="Opportunity map", xaxis_title="Expected drawdown magnitude (%)", yaxis_title="Expected 20D return (%)",
-                          height=480, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                          height=480, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff")
         st.plotly_chart(fig, use_container_width=True)
         st.caption("Bubble size = model confidence. Returns and drawdowns are distribution estimates, not forecasts with certainty.")
         st.markdown('<div class="warningbox">Institutional buying, options flow, dark pools, live news, and analyst targets are omitted until licensed sources are connected.</div>', unsafe_allow_html=True)
@@ -319,7 +333,7 @@ def terminal_page(tickers: list[str], max_position: float, risk_per_trade: float
         fig = go.Figure()
         fig.add_scatter(x=ind.index, y=ind.RSI14, name="RSI(14)", line_color="#33d6c5")
         fig.add_hline(y=70, line_dash="dot", line_color="#fb7185"); fig.add_hline(y=30, line_dash="dot", line_color="#60a5fa")
-        fig.update_layout(height=300, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        fig.update_layout(height=300, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff")
         st.plotly_chart(fig, use_container_width=True)
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("RSI(14)", fmt(a.metrics["RSI14"])); c2.metric("ADX(14)", fmt(a.metrics["ADX14"]))
