@@ -24,13 +24,15 @@ CSS = """
 [data-testid="stHeader"] { background:rgba(251,252,254,.94); }
 [data-testid="stSidebar"] { background:#edf3f8; border-right:1px solid var(--line); }
 [data-testid="stSidebar"] * { color:#334155; }
-[data-testid="stMetric"] { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; box-shadow:0 3px 12px rgba(30,55,80,.05); }
-[data-testid="stMetricLabel"] { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:.7rem; }
-[data-testid="stMetricValue"] { color:#1f2f44; }
+[data-testid="stMetric"] { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:11px 12px; box-shadow:0 3px 12px rgba(30,55,80,.05); }
+[data-testid="stMetricLabel"] { color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+[data-testid="stMetricLabel"] p { font-size:.68rem !important; line-height:1.2 !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] > div { color:#1f2f44; font-size:1.62rem !important; line-height:1.15 !important; white-space:nowrap !important; overflow:visible !important; text-overflow:clip !important; }
+[data-testid="stMetricDelta"], [data-testid="stMetricDelta"] * { font-size:.70rem !important; line-height:1.2 !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
 .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp p, .stApp label { color:var(--ink); }
 .block-container { padding-top:1.5rem; max-width:1600px; }
 .eyebrow { color:var(--teal); text-transform:uppercase; letter-spacing:.18em; font-size:.72rem; font-weight:700; }
-.hero { color:#18273b; font-size:2rem; font-weight:700; margin:.15rem 0; }
+.hero { color:#18273b; font-size:1.72rem; line-height:1.2; font-weight:700; margin:.15rem 0; }
 .subtle { color:var(--muted); font-size:.86rem; }
 .pill { display:inline-block; padding:.25rem .65rem; border-radius:999px; background:#e3f4ef; color:#07695f; border:1px solid #a9d9cf; font-size:.78rem; }
 .reason { padding:.55rem .7rem; margin:.3rem 0; border-left:3px solid var(--teal); background:#eef7f5; color:#31465b; border-radius:0 7px 7px 0; }
@@ -202,12 +204,12 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
     top = analyses[0]
     freshness(top.as_of)
     cols = st.columns(6)
-    cols[0].metric("Universe", len(analyses))
-    cols[1].metric("Top idea", top.ticker, top.classification)
+    cols[0].metric("Universe size", len(analyses))
+    cols[1].metric("Top-ranked ticker", top.ticker, top.classification)
     cols[2].metric("AI score", fmt(top.overall_score), "of 100")
     cols[3].metric("Bull probability", fmt(top.bull_probability, "pct"))
-    cols[4].metric("Confidence", fmt(top.confidence, "pct"))
-    cols[5].metric("Suggested size", fmt(top.recommended_position_size, "pct"))
+    cols[4].metric("AI confidence", fmt(top.confidence, "pct"))
+    cols[5].metric("Position size", fmt(top.recommended_position_size, "pct"))
 
     records = []
     for rank, a in enumerate(analyses, 1):
@@ -278,28 +280,50 @@ def matrix_page(tickers: list[str], max_position: float, risk_per_trade: float) 
     mode = st.selectbox("Rank by", ["Overall", "Bull %", "Expected Return %", "Confidence %", "Momentum", "RS vs SPY", "Entry Quality", "Fundamental"])
     matrix = matrix.sort_values(mode, ascending=False).reset_index(drop=True)
     matrix.insert(0, "Rank", range(1, len(matrix) + 1))
-    c1, c2 = st.columns([1.5, 1])
-    with c1:
-        st.dataframe(matrix, column_config={
-            "Overall": st.column_config.ProgressColumn("Overall", min_value=0, max_value=100, format="%.1f"),
-            "Bull %": st.column_config.ProgressColumn("Bull %", min_value=0, max_value=100, format="%.1f%%"),
-            "Confidence %": st.column_config.ProgressColumn("Confidence %", min_value=0, max_value=100, format="%.1f%%"),
-            "Momentum": st.column_config.ProgressColumn("Momentum", min_value=0, max_value=100, format="%.1f"),
-            "RS vs SPY": st.column_config.ProgressColumn("RS vs SPY", min_value=0, max_value=100, format="%.1f"),
-        }, use_container_width=True, hide_index=True, height=650)
-    with c2:
-        fig = go.Figure(go.Scatter(x=matrix["Expected Risk %"], y=matrix["Expected Return %"], mode="markers+text",
-                                   text=matrix.Ticker, textposition="top center", marker=dict(size=matrix["Confidence %"] / 4,
-                                   color=matrix["Overall"], colorscale="RdYlGn", showscale=True, colorbar_title="Score")))
-        fig.update_layout(title="Opportunity map", xaxis_title="Expected drawdown magnitude (%)", yaxis_title="Expected 20D return (%)",
-                          height=480, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff")
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("Bubble size = model confidence. Returns and drawdowns are distribution estimates, not forecasts with certainty.")
-        st.markdown('<div class="warningbox">Institutional buying, options flow, dark pools, live news, and analyst targets are omitted until licensed sources are connected.</div>', unsafe_allow_html=True)
-        workbook = excel_bytes(matrix)
-        if workbook:
-            st.download_button("Export matrix (Excel)", workbook, "axiom_prediction_matrix.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.subheader("Prediction matrix")
+    st.dataframe(matrix, column_config={
+        "Overall": st.column_config.ProgressColumn("Overall", min_value=0, max_value=100, format="%.1f"),
+        "Bull %": st.column_config.ProgressColumn("Bull %", min_value=0, max_value=100, format="%.1f%%"),
+        "Confidence %": st.column_config.ProgressColumn("Confidence %", min_value=0, max_value=100, format="%.1f%%"),
+        "Momentum": st.column_config.ProgressColumn("Momentum", min_value=0, max_value=100, format="%.1f"),
+        "RS vs SPY": st.column_config.ProgressColumn("RS vs SPY", min_value=0, max_value=100, format="%.1f"),
+    }, use_container_width=True, hide_index=True, height=min(650, 42 + 35 * len(matrix)))
+    workbook = excel_bytes(matrix)
+    if workbook:
+        st.download_button("Export matrix (Excel)", workbook, "axiom_prediction_matrix.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    st.subheader("Opportunity map")
+    st.caption("Upper-left is preferable: higher modeled return with lower expected drawdown. Bubble size represents model confidence; color represents overall score.")
+    label_positions = ["top center", "bottom center", "middle right", "middle left",
+                       "top right", "top left", "bottom right", "bottom left"]
+    text_positions = [label_positions[i % len(label_positions)] for i in range(len(matrix))]
+    marker_sizes = np.clip(matrix["Confidence %"] * 0.45, 18, 34)
+    fig = go.Figure(go.Scatter(
+        x=matrix["Expected Risk %"], y=matrix["Expected Return %"], mode="markers+text",
+        text=matrix.Ticker, textposition=text_positions, cliponaxis=False,
+        customdata=np.stack([matrix["Overall"], matrix["Confidence %"], matrix["Bull %"]], axis=-1),
+        hovertemplate=("<b>%{text}</b><br>Expected drawdown: %{x:.1f}%<br>Expected 20D return: %{y:.1f}%"
+                       "<br>Overall score: %{customdata[0]:.1f}<br>Confidence: %{customdata[1]:.1f}%"
+                       "<br>Bull probability: %{customdata[2]:.1f}%<extra></extra>"),
+        marker=dict(size=marker_sizes, color=matrix["Overall"], colorscale="RdYlGn", cmin=0, cmax=100,
+                    opacity=.88, line=dict(color="#ffffff", width=2), showscale=True,
+                    colorbar=dict(title="Overall<br>score", thickness=16, len=.72)),
+        textfont=dict(size=13, color="#334155"),
+    ))
+    fig.add_vline(x=float(matrix["Expected Risk %"].median()), line_dash="dot", line_color="#94a3b8", opacity=.65)
+    fig.add_hline(y=0, line_width=1.5, line_color="#64748b", opacity=.65)
+    fig.add_annotation(xref="paper", yref="paper", x=.01, y=.98, text="Higher return · Lower risk",
+                       showarrow=False, font=dict(size=12, color="#087f72"), bgcolor="#e3f4ef", borderpad=6)
+    fig.update_layout(
+        height=610, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff",
+        margin=dict(l=70, r=80, t=30, b=65), hovermode="closest",
+        xaxis=dict(title="Expected drawdown magnitude (%) — lower is better", rangemode="tozero",
+                   gridcolor="#e2e8f0", zeroline=False),
+        yaxis=dict(title="Expected 20-day return (%) — higher is better", gridcolor="#e2e8f0", zeroline=False),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.markdown('<div class="warningbox">Institutional buying, options flow, dark pools, live news, and analyst targets are omitted until licensed sources are connected.</div>', unsafe_allow_html=True)
 
 
 def terminal_page(tickers: list[str], max_position: float, risk_per_trade: float) -> None:
@@ -311,11 +335,16 @@ def terminal_page(tickers: list[str], max_position: float, risk_per_trade: float
     except Exception as exc:
         st.error(str(exc)); return
     freshness(a.as_of)
-    cols = st.columns(7)
-    for col, label, value in zip(cols,
-        ["Price", "AI score", "Bull", "Confidence", "Risk", "R/R", "Position"],
-        [fmt(a.price, "price"), fmt(a.overall_score), fmt(a.bull_probability, "pct"), fmt(a.confidence, "pct"),
-         fmt(a.risk_score), f"{a.reward_risk:.1f}:1", fmt(a.recommended_position_size, "pct")]):
+    primary_metrics = st.columns(4)
+    for col, label, value in zip(primary_metrics,
+        ["Current price", "Overall AI score", "Bull probability", "AI confidence"],
+        [fmt(a.price, "price"), f"{a.overall_score:.1f} / 100", fmt(a.bull_probability, "pct"),
+         fmt(a.confidence, "pct")]):
+        col.metric(label, value)
+    secondary_metrics = st.columns(3)
+    for col, label, value in zip(secondary_metrics,
+        ["Risk score", "Reward / risk", "Recommended position"],
+        [f"{a.risk_score:.1f} / 100", f"{a.reward_risk:.1f} : 1", fmt(a.recommended_position_size, "pct")]):
         col.metric(label, value)
     tabs = st.tabs(["Investment Thesis", "Trend & Structure", "Momentum & Volume", "Fundamentals & Macro", "Risk Plan", "Data Coverage"])
     with tabs[0]:
