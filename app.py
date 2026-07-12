@@ -134,7 +134,7 @@ def factor_profile_chart(a: Analysis) -> go.Figure:
     ))
     fig.add_vline(x=50, line_dash="dot", line_color="#64748b", annotation_text="Neutral 50")
     fig.update_layout(
-        title="Factor score profile · weighted inputs to the overall AI score", height=345,
+        title="Factor score profile · weighted inputs", height=345,
         template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff",
         margin=dict(l=15, r=45, t=50, b=35), xaxis=dict(range=[0, 105], title="Score (0–100)", gridcolor="#e2e8f0"),
         yaxis=dict(autorange="reversed"), showlegend=False,
@@ -206,7 +206,7 @@ def component_reference_chart(name: str, a: Analysis, features: pd.DataFrame,
         ))
         caption = "A neutral prior is used when source fields are unavailable; the displayed coverage prevents missing data from looking like strong evidence."
     fig.update_layout(
-        height=310, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff",
+        height=430, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff",
         margin=dict(l=45, r=25, t=55, b=45), legend=dict(orientation="h", y=1.02, x=0),
         font=dict(color="#334155", size=12), xaxis_gridcolor="#e2e8f0", yaxis_gridcolor="#e2e8f0",
     )
@@ -335,27 +335,30 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
     score_cols = st.columns(len(a.components))
     for col, (name, component) in zip(score_cols, a.components.items()):
         col.metric(name.replace("_", " ").title(), fmt(component.score), f"{component.coverage:.0%} coverage")
-    st.plotly_chart(factor_profile_chart(a), use_container_width=True, key=f"factor_profile_{selected}")
-    st.caption("Scores are comparable 0–100 weighted votes. The dotted 50 line is neutral; the overall score also reflects each factor's configured weight and data coverage.")
+    profile_col, probability_col = st.columns([1.2, 1])
+    with profile_col:
+        st.plotly_chart(factor_profile_chart(a), use_container_width=True, key=f"factor_profile_{selected}")
+        st.caption("Scores are comparable 0–100 weighted votes. The dotted 50 line is neutral; weights and data coverage also affect the overall score.")
+    with probability_col:
+        probability_fig = probability_chart(a)
+        probability_fig.update_layout(title="Modeled probability · direction by horizon", height=345)
+        st.plotly_chart(probability_fig, use_container_width=True, key=f"probability_{selected}")
+        st.markdown(f"**Risk plan:** stop {fmt(a.stop_loss, 'price')} · trail {fmt(a.trailing_stop, 'price')} · targets {fmt(a.target_1, 'price')} / {fmt(a.target_2, 'price')} / {fmt(a.target_3, 'price')}")
     selected_features = price_indicators(price_frames[selected])
     try:
         benchmark_features = price_indicators(cached_prices("SPY"))
     except Exception:
         benchmark_features = None
-    left, right = st.columns([1.1, .9])
-    with left:
-        for name, component in a.components.items():
-            with st.expander(f"{name.replace('_', ' ').title()} — {component.score:.1f}"):
-                for reason in component.reasons:
-                    st.markdown(f'<div class="reason">{reason}</div>', unsafe_allow_html=True)
-                reference_fig, reference_caption = component_reference_chart(
-                    name, a, selected_features, benchmark_features
-                )
-                st.plotly_chart(reference_fig, use_container_width=True, key=f"reference_{selected}_{name}")
-                st.caption(reference_caption)
-    with right:
-        st.plotly_chart(probability_chart(a), use_container_width=True)
-        st.markdown(f"**Risk plan:** stop {fmt(a.stop_loss, 'price')} · trail {fmt(a.trailing_stop, 'price')} · targets {fmt(a.target_1, 'price')} / {fmt(a.target_2, 'price')} / {fmt(a.target_3, 'price')}")
+    st.subheader("Factor evidence and reference charts")
+    for name, component in a.components.items():
+        with st.expander(f"{name.replace('_', ' ').title()} — {component.score:.1f}"):
+            for reason in component.reasons:
+                st.markdown(f'<div class="reason">{reason}</div>', unsafe_allow_html=True)
+            reference_fig, reference_caption = component_reference_chart(
+                name, a, selected_features, benchmark_features
+            )
+            st.plotly_chart(reference_fig, use_container_width=True, key=f"reference_{selected}_{name}")
+            st.caption(reference_caption)
 
 
 def matrix_page(tickers: list[str], max_position: float, risk_per_trade: float) -> None:
