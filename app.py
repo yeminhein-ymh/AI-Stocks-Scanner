@@ -362,11 +362,23 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
         benchmark_features = price_indicators(cached_prices("SPY"))
     except Exception:
         benchmark_features = None
-    reference_fig, reference_caption = component_reference_chart(
-        selected_factor, a, selected_features, benchmark_features
-    )
-    st.plotly_chart(reference_fig, use_container_width=True, key="scanner_reference_chart")
-    st.caption(reference_caption)
+    try:
+        reference_fig, reference_caption = component_reference_chart(
+            selected_factor, a, selected_features, benchmark_features
+        )
+        # Keep identities bounded to the seven factors while avoiding reuse across
+        # incompatible Plotly trace types (line, bar, scatter and gauge).
+        st.plotly_chart(
+            reference_fig,
+            use_container_width=True,
+            key=f"scanner_reference_chart_{selected_factor}",
+        )
+        st.caption(reference_caption)
+    except (KeyError, IndexError, TypeError, ValueError):
+        st.warning(
+            f"The {selected_factor.replace('_', ' ')} reference graph is temporarily unavailable "
+            "for this ticker because its source history is incomplete. The factor score and evidence remain available."
+        )
 
     with st.expander("View evidence for all factors"):
         for name, component in a.components.items():
