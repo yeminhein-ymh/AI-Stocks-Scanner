@@ -124,6 +124,95 @@ def price_chart(prices: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 
+def factor_profile_chart(a: Analysis) -> go.Figure:
+    labels = [name.replace("_", " ").title() for name in a.components]
+    scores = [component.score for component in a.components.values()]
+    fig = go.Figure(go.Bar(
+        x=scores, y=labels, orientation="h", text=[f"{score:.1f}" for score in scores],
+        textposition="outside", cliponaxis=False, marker=dict(color="#159487", line=dict(color="#087f72", width=1)),
+        hovertemplate="%{y}: %{x:.1f}/100<extra></extra>",
+    ))
+    fig.add_vline(x=50, line_dash="dot", line_color="#64748b", annotation_text="Neutral 50")
+    fig.update_layout(
+        title="Factor score profile · weighted inputs to the overall AI score", height=345,
+        template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff",
+        margin=dict(l=15, r=45, t=50, b=35), xaxis=dict(range=[0, 105], title="Score (0–100)", gridcolor="#e2e8f0"),
+        yaxis=dict(autorange="reversed"), showlegend=False,
+    )
+    return fig
+
+
+def component_reference_chart(name: str, a: Analysis, features: pd.DataFrame,
+                              benchmark_features: pd.DataFrame | None) -> tuple[go.Figure, str]:
+    component = a.components[name]
+    recent = features.tail(180)
+    if name == "trend":
+        fig = go.Figure()
+        for column, color, width in (("Close", "#172b4d", 2.4), ("EMA20", "#159487", 1.7),
+                                     ("EMA60", "#d99a20", 1.5), ("EMA200", "#8b5fbf", 1.5)):
+            fig.add_scatter(x=recent.index, y=recent[column], name=column, line=dict(color=color, width=width))
+        fig.update_layout(title="Trend reference · price versus EMA20, EMA60 and EMA200", yaxis_title="Adjusted price")
+        caption = "Last 180 daily observations. Alignment and slope show whether short-, medium-, and long-term trends agree."
+    elif name == "momentum":
+        momentum = features.tail(120)
+        fig = go.Figure(go.Scatter(x=momentum.index, y=momentum["RSI14"], name="RSI(14)",
+                                   line=dict(color="#159487", width=2.2)))
+        fig.add_hline(y=70, line_dash="dot", line_color="#b65c5c", annotation_text="Overbought 70")
+        fig.add_hline(y=50, line_dash="dot", line_color="#64748b", annotation_text="Neutral 50")
+        fig.add_hline(y=30, line_dash="dot", line_color="#4e79a7", annotation_text="Oversold 30")
+        fig.update_layout(title="Momentum reference · RSI(14) over 120 sessions", yaxis=dict(title="RSI", range=[0, 100]))
+        caption = "RSI shows the speed and persistence of recent price moves; the score also considers MACD and 20-day return."
+    elif name == "volume":
+        volume = features.tail(60)
+        colors = ["#159487" if value >= 1 else "#b8c5d1" for value in volume["RVOL"].fillna(0)]
+        fig = go.Figure(go.Bar(x=volume.index, y=volume["RVOL"], marker_color=colors, name="Relative volume"))
+        fig.add_hline(y=1, line_dash="dot", line_color="#64748b", annotation_text="20-day average")
+        fig.update_layout(title="Volume reference · daily volume relative to its 20-day average", yaxis_title="Relative volume (×)")
+        caption = "Bars above 1.0× indicate above-average participation; stronger volume gives price moves more evidential weight."
+    elif name == "relative_strength" and benchmark_features is not None:
+        joined = pd.concat([features["Close"].rename(a.ticker), benchmark_features["Close"].rename("SPY")], axis=1).dropna().tail(126)
+        indexed = joined / joined.iloc[0] * 100
+        fig = go.Figure()
+        fig.add_scatter(x=indexed.index, y=indexed[a.ticker], name=a.ticker, line=dict(color="#159487", width=2.3))
+        fig.add_scatter(x=indexed.index, y=indexed["SPY"], name="SPY", line=dict(color="#64748b", width=1.8, dash="dash"))
+        fig.update_layout(title=f"Relative-strength reference · {a.ticker} versus SPY (indexed to 100)", yaxis_title="Indexed performance")
+        caption = "Both series start at 100 over the latest 126 sessions; a widening positive gap indicates benchmark outperformance."
+    elif name == "risk_reward":
+        levels = [a.stop_loss, a.price, a.target_1, a.target_2, a.target_3]
+        labels = ["Stop", "Current", "Target 1", "Target 2", "Target 3"]
+        colors = ["#b65c5c", "#172b4d", "#159487", "#159487", "#159487"]
+        fig = go.Figure()
+        fig.add_scatter(x=[a.stop_loss, a.target_3], y=["Trade plan", "Trade plan"], mode="lines",
+                        line=dict(color="#94a3b8", width=4), hoverinfo="skip", showlegend=False)
+        fig.add_scatter(x=levels, y=["Trade plan"] * len(levels), mode="markers+text", text=labels,
+                        textposition="top center", marker=dict(size=15, color=colors, line=dict(color="#ffffff", width=2)),
+                        customdata=labels, hovertemplate="%{customdata}: $%{x:,.2f}<extra></extra>", showlegend=False)
+        fig.update_layout(title="Risk/reward reference · ATR-based stop and target ladder", xaxis_title="Price", yaxis_title="")
+        caption = f"Current reward/risk is {a.reward_risk:.2f}:1 using Target 2 versus the ATR-defined stop; levels are estimates, not guarantees."
+    elif name == "macro" and benchmark_features is not None:
+        macro = benchmark_features.tail(252)
+        fig = go.Figure()
+        fig.add_scatter(x=macro.index, y=macro["Close"], name="SPY", line=dict(color="#172b4d", width=2.2))
+        fig.add_scatter(x=macro.index, y=macro["EMA200"], name="SPY EMA200", line=dict(color="#d99a20", width=1.8))
+        fig.update_layout(title="Macro reference · SPY versus its 200-day trend", yaxis_title="Adjusted price")
+        caption = "The current macro vote uses the broad-market long-term trend; rates, dollar, commodities, and sector feeds remain optional enrichment."
+    else:
+        fig = go.Figure(go.Indicator(
+            mode="gauge+number", value=component.score, number={"suffix": " / 100"},
+            title={"text": f"{name.replace('_', ' ').title()} score · {component.coverage:.0%} data coverage"},
+            gauge={"axis": {"range": [0, 100]}, "bar": {"color": "#159487"},
+                   "steps": [{"range": [0, 40], "color": "#f1f5f9"}, {"range": [40, 70], "color": "#e2e8f0"},
+                             {"range": [70, 100], "color": "#d8eee9"}]},
+        ))
+        caption = "A neutral prior is used when source fields are unavailable; the displayed coverage prevents missing data from looking like strong evidence."
+    fig.update_layout(
+        height=310, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff",
+        margin=dict(l=45, r=25, t=55, b=45), legend=dict(orientation="h", y=1.02, x=0),
+        font=dict(color="#334155", size=12), xaxis_gridcolor="#e2e8f0", yaxis_gridcolor="#e2e8f0",
+    )
+    return fig, caption
+
+
 def thesis(a: Analysis, meta: dict[str, Any]) -> str:
     md_price = lambda value: fmt(value, "price").replace("$", r"\$")
     bull = "; ".join(a.components["trend"].reasons[:2] + a.components["relative_strength"].reasons[:1])
@@ -187,12 +276,14 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
     header("Multi-Stock AI Scanner", "Explainable ranking across trend, momentum, volume, relative strength, risk/reward, fundamentals, and macro regime.")
     st.markdown('<span class="pill">Weighted voting · probability-based · source-aware</span>', unsafe_allow_html=True)
     analyses: list[Analysis] = []
+    price_frames: dict[str, pd.DataFrame] = {}
     failures: list[str] = []
     progress = st.progress(0, text="Loading market evidence…")
     for i, ticker in enumerate(tickers):
         try:
-            result, _ = cached_analysis(ticker, max_position, risk_per_trade)
+            result, prices = cached_analysis(ticker, max_position, risk_per_trade)
             analyses.append(result)
+            price_frames[ticker] = prices
         except Exception as exc:
             failures.append(f"{ticker}: {exc}")
         progress.progress((i + 1) / max(len(tickers), 1), text=f"Analyzed {i + 1}/{len(tickers)}")
@@ -244,12 +335,24 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
     score_cols = st.columns(len(a.components))
     for col, (name, component) in zip(score_cols, a.components.items()):
         col.metric(name.replace("_", " ").title(), fmt(component.score), f"{component.coverage:.0%} coverage")
+    st.plotly_chart(factor_profile_chart(a), use_container_width=True, key=f"factor_profile_{selected}")
+    st.caption("Scores are comparable 0–100 weighted votes. The dotted 50 line is neutral; the overall score also reflects each factor's configured weight and data coverage.")
+    selected_features = price_indicators(price_frames[selected])
+    try:
+        benchmark_features = price_indicators(cached_prices("SPY"))
+    except Exception:
+        benchmark_features = None
     left, right = st.columns([1.1, .9])
     with left:
         for name, component in a.components.items():
             with st.expander(f"{name.replace('_', ' ').title()} — {component.score:.1f}"):
                 for reason in component.reasons:
                     st.markdown(f'<div class="reason">{reason}</div>', unsafe_allow_html=True)
+                reference_fig, reference_caption = component_reference_chart(
+                    name, a, selected_features, benchmark_features
+                )
+                st.plotly_chart(reference_fig, use_container_width=True, key=f"reference_{selected}_{name}")
+                st.caption(reference_caption)
     with right:
         st.plotly_chart(probability_chart(a), use_container_width=True)
         st.markdown(f"**Risk plan:** stop {fmt(a.stop_loss, 'price')} · trail {fmt(a.trailing_stop, 'price')} · targets {fmt(a.target_1, 'price')} / {fmt(a.target_2, 'price')} / {fmt(a.target_3, 'price')}")
