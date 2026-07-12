@@ -427,7 +427,7 @@ def accuracy_page() -> None:
 
 
 with st.sidebar:
-    st.markdown("## ◈ AXIOM")
+    st.markdown("## GPT AI Stocks Scanner")
     st.caption("Probabilistic Equity Intelligence")
     page = st.radio("Workspace", ["AI Scanner", "Prediction Matrix", "Technical Terminal", "Accuracy Lab"])
     st.divider()
