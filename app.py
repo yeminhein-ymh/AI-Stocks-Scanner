@@ -276,14 +276,12 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
     header("Multi-Stock AI Scanner", "Explainable ranking across trend, momentum, volume, relative strength, risk/reward, fundamentals, and macro regime.")
     st.markdown('<span class="pill">Weighted voting · probability-based · source-aware</span>', unsafe_allow_html=True)
     analyses: list[Analysis] = []
-    price_frames: dict[str, pd.DataFrame] = {}
     failures: list[str] = []
     progress = st.progress(0, text="Loading market evidence…")
     for i, ticker in enumerate(tickers):
         try:
-            result, prices = cached_analysis(ticker, max_position, risk_per_trade)
+            result, _ = cached_analysis(ticker, max_position, risk_per_trade)
             analyses.append(result)
-            price_frames[ticker] = prices
         except Exception as exc:
             failures.append(f"{ticker}: {exc}")
         progress.progress((i + 1) / max(len(tickers), 1), text=f"Analyzed {i + 1}/{len(tickers)}")
@@ -329,7 +327,7 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
         with st.expander(f"Data exceptions ({len(failures)})"):
             st.write("\n".join(failures))
 
-    selected = st.selectbox("Explain a ranked security", [a.ticker for a in analyses])
+    selected = st.selectbox("Explain a ranked security", [a.ticker for a in analyses], key="scanner_security")
     a = next(item for item in analyses if item.ticker == selected)
     st.subheader(f"Why {a.ticker} scores {a.overall_score:.1f}")
     score_cols = st.columns(len(a.components))
@@ -337,28 +335,44 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
         col.metric(name.replace("_", " ").title(), fmt(component.score), f"{component.coverage:.0%} coverage")
     profile_col, probability_col = st.columns([1.2, 1])
     with profile_col:
-        st.plotly_chart(factor_profile_chart(a), use_container_width=True, key=f"factor_profile_{selected}")
+        st.plotly_chart(factor_profile_chart(a), use_container_width=True, key="scanner_factor_profile")
         st.caption("Scores are comparable 0–100 weighted votes. The dotted 50 line is neutral; weights and data coverage also affect the overall score.")
     with probability_col:
         probability_fig = probability_chart(a)
         probability_fig.update_layout(title="Modeled probability · direction by horizon", height=345)
-        st.plotly_chart(probability_fig, use_container_width=True, key=f"probability_{selected}")
+        st.plotly_chart(probability_fig, use_container_width=True, key="scanner_probability")
         st.markdown(f"**Risk plan:** stop {fmt(a.stop_loss, 'price')} · trail {fmt(a.trailing_stop, 'price')} · targets {fmt(a.target_1, 'price')} / {fmt(a.target_2, 'price')} / {fmt(a.target_3, 'price')}")
-    selected_features = price_indicators(price_frames[selected])
+
+    st.subheader("Factor evidence and reference chart")
+    factor_names = list(a.components)
+    selected_factor = st.selectbox(
+        "Detailed reference graph",
+        factor_names,
+        format_func=lambda name: name.replace("_", " ").title(),
+        key="scanner_reference_factor",
+    )
+    selected_component = a.components[selected_factor]
+    st.caption(f"Current {selected_factor.replace('_', ' ')} score: {selected_component.score:.1f} / 100")
+    for reason in selected_component.reasons:
+        st.markdown(f'<div class="reason">{reason}</div>', unsafe_allow_html=True)
+
+    _, selected_prices = cached_analysis(selected, max_position, risk_per_trade)
+    selected_features = price_indicators(selected_prices)
     try:
         benchmark_features = price_indicators(cached_prices("SPY"))
     except Exception:
         benchmark_features = None
-    st.subheader("Factor evidence and reference charts")
-    for name, component in a.components.items():
-        with st.expander(f"{name.replace('_', ' ').title()} — {component.score:.1f}"):
+    reference_fig, reference_caption = component_reference_chart(
+        selected_factor, a, selected_features, benchmark_features
+    )
+    st.plotly_chart(reference_fig, use_container_width=True, key="scanner_reference_chart")
+    st.caption(reference_caption)
+
+    with st.expander("View evidence for all factors"):
+        for name, component in a.components.items():
+            st.markdown(f"**{name.replace('_', ' ').title()} — {component.score:.1f}**")
             for reason in component.reasons:
                 st.markdown(f'<div class="reason">{reason}</div>', unsafe_allow_html=True)
-            reference_fig, reference_caption = component_reference_chart(
-                name, a, selected_features, benchmark_features
-            )
-            st.plotly_chart(reference_fig, use_container_width=True, key=f"reference_{selected}_{name}")
-            st.caption(reference_caption)
 
 
 def matrix_page(tickers: list[str], max_position: float, risk_per_trade: float) -> None:
