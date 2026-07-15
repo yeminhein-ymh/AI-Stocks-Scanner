@@ -17,6 +17,8 @@ from institutional.signals import SignalStore, performance_metrics
 
 st.set_page_config(page_title="Axiom AI Research", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
 
+TICKER_LIMIT = 30
+
 CSS = """
 <style>
 :root { --ink:#243247; --muted:#62748a; --panel:#ffffff; --line:#d7e0ea; --teal:#087f72; --soft:#f4f7fb; }
@@ -100,6 +102,23 @@ def header(title: str, subtitle: str) -> None:
 def freshness(as_of: str) -> None:
     now = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
     st.caption(f"Price data through {as_of} · App refreshed {now} · Delayed/end-of-day source")
+
+
+def saved_ticker_universe() -> str:
+    """Load the user's last universe from the current page URL."""
+    if "tickers" not in st.query_params:
+        return ", ".join(normalize_tickers(DEFAULT_UNIVERSE, limit=TICKER_LIMIT))
+    saved = st.query_params.get("tickers", "")
+    if isinstance(saved, list):
+        saved = ",".join(saved)
+    return ", ".join(normalize_tickers(str(saved), limit=TICKER_LIMIT))
+
+
+def persist_ticker_universe() -> None:
+    """Save additions and deletions so normal browser refreshes keep the list."""
+    raw = st.session_state.get("ticker_universe", "")
+    tickers = normalize_tickers(raw, limit=TICKER_LIMIT)
+    st.query_params["tickers"] = ",".join(tickers)
 
 
 def probability_chart(a: Analysis) -> go.Figure:
@@ -563,9 +582,16 @@ with st.sidebar:
     st.caption("Probabilistic Equity Intelligence")
     page = st.radio("Workspace", ["AI Scanner", "Prediction Matrix", "Technical Terminal", "Accuracy Lab"])
     st.divider()
-    raw = st.text_area("Universe (comma-separated)", ", ".join(DEFAULT_UNIVERSE[:10]), height=120)
-    tickers = normalize_tickers(raw)
-    st.caption(f"{len(tickers)} valid tickers · scanner limit 75")
+    if "ticker_universe" not in st.session_state:
+        st.session_state["ticker_universe"] = saved_ticker_universe()
+    raw = st.text_area(
+        "Universe (comma-separated)",
+        key="ticker_universe",
+        height=120,
+        on_change=persist_ticker_universe,
+    )
+    tickers = normalize_tickers(raw, limit=TICKER_LIMIT)
+    st.caption(f"{len(tickers)} saved tickers · limit {TICKER_LIMIT} · additions and deletions save automatically")
     st.subheader("Portfolio constraints")
     risk_per_trade = st.slider("Risk per trade (%)", .25, 3.0, 1.0, .25)
     max_position = st.slider("Maximum position (%)", 2.0, 30.0, 15.0, 1.0)
