@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Ticker storage</title>
+</head>
+<body style="margin:0;overflow:hidden">
+<script>
+  const STORAGE_KEY = "gpt_ai_stocks_scanner_tickers_v1";
+  let readSent = false;
+
+  function send(type, extra = {}) {
+    window.parent.postMessage({ isStreamlitMessage: true, type, ...extra }, "*");
+  }
+
+  function sendValue(value) {
+    send("streamlit:setComponentValue", { value });
+  }
+
+  function handleRender(event) {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    const args = event.data.args || {};
+    try {
+      if (args.write) {
+        localStorage.setItem(STORAGE_KEY, String(args.value || ""));
+      } else if (!readSent) {
+        const found = localStorage.getItem(STORAGE_KEY) !== null;
+        sendValue({ found, value: found ? localStorage.getItem(STORAGE_KEY) : "" });
+        readSent = true;
+      }
+    } catch (_) {
+      if (!readSent) {
+        sendValue({ found: false, value: "", available: false });
+        readSent = true;
+      }
+    }
+    send("streamlit:setFrameHeight", { height: 0 });
+  }
+
+  window.addEventListener("message", handleRender);
+  send("streamlit:componentReady", { apiVersion: 1 });
+  send("streamlit:setFrameHeight", { height: 0 });
+</script>
+</body>
+</html>
