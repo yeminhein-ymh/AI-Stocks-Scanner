@@ -33,15 +33,19 @@ The app needs outbound network access for Yahoo Finance. Quotes are delayed/end-
 
 Connect licensed feeds for dark pools, options flow, open-interest change, dealer gamma, short interest, live news, analyst estimates, economic calendars, and institutional ownership. Model retraining should run outside the Streamlit process using purged walk-forward validation, point-in-time features, transaction costs, drift monitoring, and champion/challenger promotion.
 
-### Optional Tradier option chain
+### Optional options data
 
-The **Smart Money Options** page can use Tradier option-chain quotes, volume, open interest, IV, and Greeks. Add the token to Streamlit Secrets; never commit it to GitHub:
+The **Smart Money Options** page prefers Alpaca and retains Tradier as a fallback. Add newly generated credentials to Streamlit Secrets; never commit them to GitHub:
 
 ```toml
-TRADIER_TOKEN = "your-private-token"
+ALPACA_API_KEY_ID = "your-new-paper-key"
+ALPACA_API_SECRET_KEY = "your-new-paper-secret"
+ALPACA_TRADING_BASE_URL = "https://paper-api.alpaca.markets"
+ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
+ALPACA_OPTIONS_FEED = "indicative"
 ```
 
-An option chain does not identify trade aggressor, opening/closing status, multi-leg relationships, or institutional ownership. Those conclusions remain withheld until a licensed trade-level OPRA/NBBO source is connected.
+The paper endpoint supplies contract metadata; the market-data endpoint supplies option-chain snapshots. The free indicative feed is delayed and modified. An option chain does not identify trade aggressor, opening/closing status, multi-leg relationships, or institutional ownership. Those conclusions remain withheld until a licensed trade-level OPRA/NBBO source is connected.
 
 ## Tests
 

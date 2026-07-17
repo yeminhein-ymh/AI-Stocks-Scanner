@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -9,6 +9,8 @@ import pandas as pd
 
 
 TRADIER_MARKET_URL = "https://api.tradier.com/v1/markets"
+ALPACA_PAPER_URL = "https://paper-api.alpaca.markets"
+ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 
 class OptionsDataUnavailable(RuntimeError):
@@ -60,6 +62,170 @@ def _request_json(path: str, token: str, params: dict[str, Any]) -> dict[str, An
     if not isinstance(payload, dict):
         raise OptionsDataUnavailable("Tradier returned an unexpected response.")
     return payload
+
+
+def _alpaca_request_json(url: str, key_id: str, secret_key: str,
+                         params: dict[str, Any]) -> dict[str, Any]:
+    import requests
+
+    response = requests.get(
+        url,
+        headers={
+            "APCA-API-KEY-ID": key_id,
+            "APCA-API-SECRET-KEY": secret_key,
+            "Accept": "application/json",
+        },
+        params=params,
+        timeout=25,
+    )
+    if response.status_code == 401:
+        raise OptionsDataUnavailable("Alpaca rejected the API credentials.")
+    if response.status_code == 403:
+        raise OptionsDataUnavailable(
+            "Alpaca denied this options-data request. Check the selected OPRA/indicative feed and account permissions."
+        )
+    if response.status_code == 429:
+        raise OptionsDataUnavailable("Alpaca rate limit reached; try again shortly.")
+    try:
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        raise OptionsDataUnavailable(f"Alpaca request failed with HTTP {response.status_code}.") from exc
+    if not isinstance(payload, dict):
+        raise OptionsDataUnavailable("Alpaca returned an unexpected response.")
+    return payload
+
+
+def _alpaca_base(value: str, default: str) -> str:
+    base = (value or default).strip().rstrip("/")
+    return base[:-3] if base.endswith("/v2") else base
+
+
+def normalize_alpaca_chain(contracts: list[dict[str, Any]], snapshots: dict[str, Any],
+                           spot: float) -> pd.DataFrame:
+    """Normalize Alpaca chain snapshots and contract metadata without inferring trade intent."""
+    rows: list[dict[str, Any]] = []
+    for contract in contracts:
+        symbol = str(contract.get("symbol") or "")
+        snapshot = snapshots.get(symbol) if isinstance(snapshots, dict) else None
+        if not isinstance(snapshot, dict):
+            continue
+        quote = snapshot.get("latestQuote") or snapshot.get("latest_quote") or {}
+        trade = snapshot.get("latestTrade") or snapshot.get("latest_trade") or {}
+        daily = snapshot.get("dailyBar") or snapshot.get("daily_bar") or {}
+        greeks = snapshot.get("greeks") or {}
+        expiration = str(contract.get("expiration_date") or "")[:10]
+        try:
+            expiry_date = date.fromisoformat(expiration)
+        except ValueError:
+            continue
+        bid = _number(quote.get("bp", quote.get("bid_price")))
+        ask = _number(quote.get("ap", quote.get("ask_price")))
+        last = _number(trade.get("p", trade.get("price")))
+        mid = (bid + ask) / 2 if np.isfinite(bid) and np.isfinite(ask) and ask >= bid else last
+        strike = _number(contract.get("strike_price"))
+        option_type = str(contract.get("type") or "").lower()
+        side = "Call" if option_type.startswith("c") else "Put" if option_type.startswith("p") else "Unknown"
+        iv = _number(snapshot.get("impliedVolatility", snapshot.get("implied_volatility")))
+        volume = max(_number(daily.get("v", daily.get("volume")), 0.0), 0.0)
+        open_interest = max(_number(contract.get("open_interest"), 0.0), 0.0)
+        spread_pct = ((ask - bid) / mid * 100) if np.isfinite(mid) and mid > 0 and np.isfinite(bid) and np.isfinite(ask) else np.nan
+        rows.append({
+            "Contract": symbol,
+            "Type": side,
+            "Expiration": expiration,
+            "DTE": max((expiry_date - date.today()).days, 0),
+            "Strike": strike,
+            "Bid": bid,
+            "Ask": ask,
+            "Mid": mid,
+            "Last": last,
+            "Volume": volume,
+            "Open Interest": open_interest,
+            "Spread %": spread_pct,
+            "IV %": iv * 100 if np.isfinite(iv) and iv <= 5 else iv,
+            "Delta": _number(greeks.get("delta")),
+            "Gamma": _number(greeks.get("gamma")),
+            "Theta": _number(greeks.get("theta")),
+            "Vega": _number(greeks.get("vega")),
+            "Rho": _number(greeks.get("rho")),
+            "Moneyness %": (strike / spot - 1) * 100 if spot > 0 and np.isfinite(strike) else np.nan,
+            "Quoted Activity $": mid * volume * 100 if np.isfinite(mid) else np.nan,
+        })
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        raise OptionsDataUnavailable("Alpaca returned no usable option-chain snapshots for the selected ticker.")
+    return frame.sort_values(["Expiration", "Strike", "Type"]).reset_index(drop=True)
+
+
+def fetch_alpaca_snapshot(ticker: str, key_id: str, secret_key: str, spot: float,
+                          feed: str = "indicative", trading_base_url: str = ALPACA_PAPER_URL,
+                          data_base_url: str = ALPACA_DATA_URL,
+                          max_expirations: int = 6) -> OptionsSnapshot:
+    if not key_id.strip() or not secret_key.strip():
+        raise OptionsDataUnavailable("Alpaca credentials are not configured in Streamlit Secrets.")
+    feed = feed.strip().lower()
+    if feed not in {"indicative", "opra"}:
+        raise OptionsDataUnavailable("ALPACA_OPTIONS_FEED must be 'indicative' or 'opra'.")
+    trading_base = _alpaca_base(trading_base_url, ALPACA_PAPER_URL)
+    data_base = _alpaca_base(data_base_url, ALPACA_DATA_URL)
+    start = date.today()
+    end = start + timedelta(days=120)
+    strike_low, strike_high = max(0.01, spot * 0.65), spot * 1.35
+
+    contract_params: dict[str, Any] = {
+        "underlying_symbols": ticker,
+        "status": "active",
+        "expiration_date_gte": start.isoformat(),
+        "expiration_date_lte": end.isoformat(),
+        "strike_price_gte": round(strike_low, 2),
+        "strike_price_lte": round(strike_high, 2),
+        "limit": 10000,
+    }
+    contracts: list[dict[str, Any]] = []
+    for _ in range(3):
+        payload = _alpaca_request_json(
+            f"{trading_base}/v2/options/contracts", key_id, secret_key, contract_params
+        )
+        contracts.extend(item for item in _items(payload.get("option_contracts")) if isinstance(item, dict))
+        page_token = payload.get("page_token") or payload.get("next_page_token")
+        if not page_token:
+            break
+        contract_params["page_token"] = page_token
+    expirations = sorted({str(item.get("expiration_date"))[:10] for item in contracts if item.get("expiration_date")})[:max_expirations]
+    if not expirations:
+        raise OptionsDataUnavailable(f"Alpaca returned no current option contracts for {ticker}.")
+    selected_contracts = [item for item in contracts if str(item.get("expiration_date"))[:10] in expirations]
+
+    chain_params: dict[str, Any] = {
+        "feed": feed,
+        "expiration_date_gte": expirations[0],
+        "expiration_date_lte": expirations[-1],
+        "strike_price_gte": round(strike_low, 2),
+        "strike_price_lte": round(strike_high, 2),
+        "limit": 1000,
+    }
+    snapshots: dict[str, Any] = {}
+    for _ in range(8):
+        payload = _alpaca_request_json(
+            f"{data_base}/v1beta1/options/snapshots/{ticker}", key_id, secret_key, chain_params
+        )
+        values = payload.get("snapshots") or {}
+        if isinstance(values, dict):
+            snapshots.update(values)
+        page_token = payload.get("next_page_token") or payload.get("page_token")
+        if not page_token:
+            break
+        chain_params["page_token"] = page_token
+    frame = normalize_alpaca_chain(selected_contracts, snapshots, spot)
+    return OptionsSnapshot(
+        ticker=ticker,
+        spot=spot,
+        as_of=datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC"),
+        contracts=frame,
+        expirations=expirations,
+        provider=f"Alpaca ({feed})",
+    )
 
 
 def _expiration_dates(payload: dict[str, Any]) -> list[str]:

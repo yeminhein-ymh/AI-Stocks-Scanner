@@ -18,6 +18,7 @@ from institutional.options import (
     OptionsDataUnavailable,
     OptionsSnapshot,
     expected_move_table,
+    fetch_alpaca_snapshot,
     fetch_tradier_snapshot,
     income_candidates,
     options_summary,
@@ -93,17 +94,38 @@ def cached_analysis(ticker: str, max_position: float, risk_per_trade: float) -> 
     return result, prices
 
 
-def tradier_token() -> str:
-    """Read a private options token without requiring a secrets file in local/test mode."""
+def app_secret(name: str, default: str = "") -> str:
+    """Read a private setting without requiring a secrets file in local/test mode."""
     try:
-        return str(st.secrets.get("TRADIER_TOKEN", "")).strip()
+        return str(st.secrets.get(name, default)).strip()
     except Exception:
-        return ""
+        return default
+
+
+def options_credentials_configured() -> bool:
+    alpaca_ready = bool(app_secret("ALPACA_API_KEY_ID") and app_secret("ALPACA_API_SECRET_KEY"))
+    return alpaca_ready or bool(app_secret("TRADIER_TOKEN"))
 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def cached_options_snapshot(ticker: str, spot: float) -> OptionsSnapshot:
-    return fetch_tradier_snapshot(ticker, tradier_token(), spot, max_expirations=6)
+    alpaca_key = app_secret("ALPACA_API_KEY_ID")
+    alpaca_secret = app_secret("ALPACA_API_SECRET_KEY")
+    if alpaca_key and alpaca_secret:
+        return fetch_alpaca_snapshot(
+            ticker=ticker,
+            key_id=alpaca_key,
+            secret_key=alpaca_secret,
+            spot=spot,
+            feed=app_secret("ALPACA_OPTIONS_FEED", "indicative"),
+            trading_base_url=app_secret("ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets"),
+            data_base_url=app_secret("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets"),
+            max_expirations=6,
+        )
+    tradier = app_secret("TRADIER_TOKEN")
+    if tradier:
+        return fetch_tradier_snapshot(ticker, tradier, spot, max_expirations=6)
+    raise OptionsDataUnavailable("Configure Alpaca credentials or TRADIER_TOKEN in Streamlit Secrets.")
 
 
 def fmt(value: Any, kind: str = "number") -> str:
@@ -1060,10 +1082,9 @@ def smart_money_page(tickers: list[str], max_position: float, risk_per_trade: fl
         st.error(f"The connected price source could not analyze {ticker}: {exc}")
         return
 
-    token = tradier_token()
     snapshot: OptionsSnapshot | None = None
-    options_error = "TRADIER_TOKEN is not configured in Streamlit Secrets."
-    if token:
+    options_error = "Configure Alpaca credentials or TRADIER_TOKEN in Streamlit Secrets."
+    if options_credentials_configured():
         try:
             snapshot = cached_options_snapshot(ticker, a.price)
             options_error = ""
@@ -1093,13 +1114,18 @@ def smart_money_page(tickers: list[str], max_position: float, risk_per_trade: fl
         )
     else:
         st.success(
-            f"Tradier option chain connected · {len(snapshot.contracts):,} contracts across "
+            f"{snapshot.provider} option chain connected · {len(snapshot.contracts):,} contracts across "
             f"{snapshot.contracts['Expiration'].nunique()} expirations · snapshot requested {snapshot.as_of}."
         )
         st.info(
             "A chain snapshot shows quotes, volume, open interest, IV and Greeks. It does not identify which side initiated a trade, "
             "whether it opened or closed, or whether several legs belong to one institutional order."
         )
+        if "indicative" in snapshot.provider.lower():
+            st.warning(
+                "Alpaca's indicative options feed is delayed and its quotes are modified. Use it for research and interface testing, "
+                "not immediate execution decisions. OPRA access requires the appropriate market-data subscription."
+            )
 
     summary_tab, heatmap_tab, decoder_tab, income_tab, probability_tab, audit_tab = st.tabs([
         "Smart Money Summary", "Options Heat Map", "Institutional Decoder",
@@ -1142,7 +1168,7 @@ def smart_money_page(tickers: list[str], max_position: float, risk_per_trade: fl
 
     with heatmap_tab:
         if snapshot is None:
-            st.info("Connect Tradier to display strike-by-expiration heat maps from a real option chain.")
+            st.info("Connect Alpaca or Tradier to display strike-by-expiration heat maps from a real option chain.")
         else:
             control_1, control_2 = st.columns(2)
             option_type = control_1.radio("Option type", ["Call", "Put"], horizontal=True,
@@ -1199,7 +1225,7 @@ def smart_money_page(tickers: list[str], max_position: float, risk_per_trade: fl
             "These are mechanical quote screens inspired by seller dashboards. They are not smart-money detections or trade recommendations."
         )
         if snapshot is None:
-            st.info("Connect Tradier to calculate cash-secured-put and covered-call candidates from executable bid quotations.")
+            st.info("Connect Alpaca or Tradier to calculate cash-secured-put and covered-call candidates from bid quotations.")
         else:
             minimum_oi = st.number_input("Minimum open interest", 0, 10000, 100, 50,
                                          key="income_min_oi")
@@ -1267,7 +1293,7 @@ def smart_money_page(tickers: list[str], max_position: float, risk_per_trade: fl
         source_rows = [
             {"Evidence": "Price and technical", "Status": "Connected", "What is valid": "Trend, momentum, volume, relative strength and realized volatility"},
             {"Evidence": "Option-chain quotes and Greeks", "Status": chain_status,
-             "What is valid": "Bid/ask, midpoint, volume, OI, IV and Greeks" if snapshot is not None else "Requires TRADIER_TOKEN"},
+             "What is valid": "Bid/ask, midpoint, volume, OI, IV and Greeks" if snapshot is not None else "Requires Alpaca credentials or TRADIER_TOKEN"},
             {"Evidence": "Historical IV / IV rank / OI change", "Status": "Not connected", "What is valid": "Requires historical options snapshots"},
             {"Evidence": "Trade prints and NBBO", "Status": "Not connected", "What is valid": "Required for aggressor-side and premium-at-print analysis"},
             {"Evidence": "Complex orders and trade conditions", "Status": "Not connected", "What is valid": "Required for spreads, rolls, sweeps and multi-leg intent"},
@@ -1276,12 +1302,20 @@ def smart_money_page(tickers: list[str], max_position: float, risk_per_trade: fl
             {"Evidence": "Trained ML ensemble", "Status": "Not connected", "What is valid": "Statistical distribution only; no claimed XGBoost/LSTM/Transformer model"},
         ]
         st.dataframe(pd.DataFrame(source_rows), use_container_width=True, hide_index=True)
-        with st.expander("Connect the Tradier option chain", expanded=snapshot is None):
+        with st.expander("Connect Alpaca options data", expanded=snapshot is None):
             st.markdown(
-                "Add the token in **Streamlit Cloud → Manage app → Settings → Secrets**. Never upload it to GitHub."
+                "Add newly generated credentials in **Streamlit Cloud → Manage app → Settings → Secrets**. "
+                "Alpaca is preferred when both Alpaca and Tradier are configured. Never upload credentials to GitHub."
             )
-            st.code('TRADIER_TOKEN = "your-private-token"', language="toml")
-            st.markdown("API reference: https://docs.tradier.com/reference/brokerage-api-markets-get-options-chains")
+            st.code(
+                'ALPACA_API_KEY_ID = "your-new-paper-key"\n'
+                'ALPACA_API_SECRET_KEY = "your-new-paper-secret"\n'
+                'ALPACA_TRADING_BASE_URL = "https://paper-api.alpaca.markets"\n'
+                'ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"\n'
+                'ALPACA_OPTIONS_FEED = "indicative"',
+                language="toml",
+            )
+            st.markdown("Alpaca chain reference: https://docs.alpaca.markets/reference/optionchain")
         st.caption(
             "For production institutional decoding, connect a licensed trade-level OPRA/NBBO source such as Cboe LiveVol or another "
             "provider that supplies trade conditions, exchange routing and complex-order context."
