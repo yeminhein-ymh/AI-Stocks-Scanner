@@ -612,10 +612,157 @@ def accuracy_page() -> None:
     st.caption("Retraining is deliberately not automatic in this MVP: a scheduled, walk-forward validated training pipeline should promote models only after out-of-sample and transaction-cost checks.")
 
 
+def reference_page() -> None:
+    header(
+        "Stock Trading Reference Guide",
+        "Plain-language definitions for the scanner, technical analysis, risk management, and responsible trade planning.",
+    )
+    st.info(
+        "Start with trend, then confirm momentum and volume, define the invalidation level, and size the position from risk. "
+        "No single indicator should be used as a standalone buy or sell signal."
+    )
+
+    st.subheader("Beginner learning path")
+    learning_cols = st.columns(4)
+    learning_cols[0].markdown("**1 · Context**\n\nIdentify the market and stock trend.")
+    learning_cols[1].markdown("**2 · Confirmation**\n\nCheck momentum, volume, and relative strength.")
+    learning_cols[2].markdown("**3 · Risk plan**\n\nSet entry, stop, targets, and position size.")
+    learning_cols[3].markdown("**4 · Review**\n\nRecord the result and improve the process.")
+
+    trend_tab, indicator_tab, scanner_tab, risk_tab, fundamental_tab = st.tabs([
+        "Trend stages", "Indicators", "Scanner scores", "Risk & execution", "Fundamentals & data",
+    ])
+
+    with trend_tab:
+        st.subheader("Weinstein-style trend stages")
+        stage_rows = [
+            {"Stage": "Stage 1 — Basing", "Plain meaning": "Sideways stabilization after weakness; a new uptrend is not confirmed.",
+             "Exact scanner rule": "Price is below EMA200, but Price < EMA50 < EMA200 is not fully aligned."},
+            {"Stage": "Stage 2 — Advancing", "Plain meaning": "Established long-term uptrend; normally the most constructive stage for long positions.",
+             "Exact scanner rule": "Price > EMA50 > EMA200 and EMA200 is higher than it was 20 sessions ago."},
+            {"Stage": "Stage 3 — Distribution", "Plain meaning": "The advance is losing strength and may be forming a top.",
+             "Exact scanner rule": "Reported as Stage 1/3 when price is at or above EMA200 but full Stage 2 alignment is absent."},
+            {"Stage": "Stage 4 — Declining", "Plain meaning": "Established downtrend; long positions face elevated trend risk.",
+             "Exact scanner rule": "Price < EMA50 < EMA200."},
+        ]
+        st.dataframe(pd.DataFrame(stage_rows), use_container_width=True, hide_index=True)
+        st.warning(
+            "Stage 1/3 is intentionally ambiguous: moving averages alone cannot reliably distinguish accumulation from distribution. "
+            "Use price structure, volume, momentum, and relative strength for confirmation."
+        )
+        with st.expander("Price structure vocabulary"):
+            st.markdown(
+                "- **Uptrend:** a sequence of higher highs and higher lows.\n"
+                "- **Downtrend:** a sequence of lower highs and lower lows.\n"
+                "- **Support:** an area where buying previously absorbed selling; it can fail.\n"
+                "- **Resistance:** an area where selling previously absorbed buying; it can break.\n"
+                "- **Breakout:** price moves beyond a defined range or prior high, preferably with confirmation.\n"
+                "- **Pullback:** a temporary move against the prevailing trend.\n"
+                "- **Consolidation/base:** price trades in a range while supply and demand rebalance."
+            )
+
+    with indicator_tab:
+        indicator_rows = [
+            {"Indicator": "EMA20 / EMA50 / EMA60 / EMA200", "What it measures": "Smoothed price trend over short to long horizons.",
+             "How to read": "Price and faster averages above slower rising averages are constructive; crossings can lag."},
+            {"Indicator": "RSI(14)", "What it measures": "Momentum on a 0–100 scale.",
+             "How to read": "Above 70 is conventionally overbought, near 50 neutral, below 30 oversold; extremes do not guarantee reversal."},
+            {"Indicator": "MACD", "What it measures": "Difference between 12- and 26-period EMAs, compared with a 9-period signal line.",
+             "How to read": "MACD above its signal supports positive momentum; it is a lagging confirmation tool."},
+            {"Indicator": "ADX(14)", "What it measures": "Trend strength, not trend direction.",
+             "How to read": "Below 20 often weak/ranging, 20–25 developing, above 25 stronger; direction comes from price structure."},
+            {"Indicator": "ATR(14)", "What it measures": "Average daily trading range and volatility.",
+             "How to read": "Higher ATR means wider normal movement; the scanner uses ATR to estimate stops and targets."},
+            {"Indicator": "Relative volume (RVOL)", "What it measures": "Current volume divided by its 20-day average.",
+             "How to read": "1.0× is average; above 1.0× shows greater participation, but direction still matters."},
+            {"Indicator": "Relative strength vs SPY", "What it measures": "The stock's 60-day return minus SPY's 60-day return.",
+             "How to read": "Positive means outperformance; this is not the same calculation as RSI."},
+            {"Indicator": "Historical volatility", "What it measures": "Annualized variability of recent daily returns.",
+             "How to read": "Higher volatility implies a wider range of possible outcomes and usually requires smaller sizing."},
+        ]
+        st.dataframe(pd.DataFrame(indicator_rows), use_container_width=True, hide_index=True)
+        st.caption("Indicators summarize historical data. They do not know future news, earnings surprises, gaps, or liquidity shocks.")
+
+    with scanner_tab:
+        score_rows = [
+            {"Term": "AI score (0–100)", "Definition": "Weighted combination of trend, momentum, volume, relative strength, risk/reward, fundamental, and macro factor scores."},
+            {"Term": "Factor score", "Definition": "A standardized 0–100 vote for one evidence category; 50 is broadly neutral."},
+            {"Term": "Data coverage", "Definition": "Share of expected source fields available. Missing fields reduce confidence and may use a neutral prior rather than fabricated evidence."},
+            {"Term": "Bull / Bear / Sideways probability", "Definition": "Model-estimated directional distribution for a stated horizon—not certainty, odds from an exchange, or a guarantee."},
+            {"Term": "Confidence", "Definition": "Reliability adjustment based on coverage, sample size, and agreement among factor scores."},
+            {"Term": "Expected 20D return", "Definition": "Model estimate of the average return over about 20 trading sessions; realized returns can differ materially."},
+            {"Term": "Expected drawdown", "Definition": "Volatility-based adverse-move estimate over the horizon, not a worst-case loss."},
+            {"Term": "Risk score", "Definition": "Composite emphasizing ATR volatility and the quality of the estimated reward/risk setup; higher means more risk."},
+        ]
+        st.dataframe(pd.DataFrame(score_rows), use_container_width=True, hide_index=True)
+        st.subheader("Scanner classification thresholds")
+        st.markdown(
+            "- **Strong Buy:** AI score at least 78 **and** confidence at least 60%.\n"
+            "- **Buy / Swing Trade:** AI score at least 65.\n"
+            "- **Watchlist:** AI score at least 55.\n"
+            "- **Neutral:** AI score from 35 up to, but not including, 55.\n"
+            "- **Avoid / Short Candidate:** AI score below 35."
+        )
+        st.warning("A classification is research shorthand, not personalized advice or an instruction to place an order.")
+
+    with risk_tab:
+        risk_rows = [
+            {"Term": "Entry/reference price", "Definition": "Price used to construct the plan; actual execution may differ because of spread, slippage, or gaps."},
+            {"Term": "Stop-loss", "Definition": "Predefined invalidation level intended to limit loss. A stop order can fill below its trigger during a gap."},
+            {"Term": "Trailing stop", "Definition": "A stop that follows favorable price movement; setting it too tightly can cause premature exits."},
+            {"Term": "Target", "Definition": "Potential profit-taking level, not a forecast that price must reach it."},
+            {"Term": "Reward/risk (R/R)", "Definition": "Potential reward divided by planned risk. Example: $10 upside / $5 downside = 2:1."},
+            {"Term": "Risk per trade", "Definition": "Maximum intended portfolio loss if the stop is reached; commonly kept small to survive losing streaks."},
+            {"Term": "Position size", "Definition": "Shares × price. Risk-based shares ≈ allowed dollar risk / distance from entry to stop."},
+            {"Term": "Kelly fraction", "Definition": "Mathematical sizing estimate using win probability and payoff. It is highly sensitive to estimation error, so the app caps it."},
+            {"Term": "Liquidity", "Definition": "Ability to trade without materially moving price. Low liquidity usually means wider spreads and greater slippage."},
+        ]
+        st.dataframe(pd.DataFrame(risk_rows), use_container_width=True, hide_index=True)
+        with st.expander("Common order types"):
+            st.markdown(
+                "- **Market order:** prioritizes execution, not price.\n"
+                "- **Limit order:** sets the worst acceptable price, but may not fill.\n"
+                "- **Stop order:** activates after a trigger and can experience slippage.\n"
+                "- **Stop-limit order:** controls price after triggering, but may remain unfilled."
+            )
+        st.error("Never size a trade from potential profit alone. Define the invalidation point and affordable loss first.")
+
+    with fundamental_tab:
+        fundamental_rows = [
+            {"Term": "Market capitalization", "Definition": "Share price × shares outstanding; a measure of company equity value, not revenue."},
+            {"Term": "Forward P/E", "Definition": "Price divided by forecast earnings per share. Comparisons are most useful among similar businesses."},
+            {"Term": "Revenue growth", "Definition": "Change in sales; growth quality depends on durability, margins, and cash generation."},
+            {"Term": "Earnings growth", "Definition": "Change in profit; can be affected by accounting items and share buybacks."},
+            {"Term": "Profit margin", "Definition": "Profit as a percentage of revenue."},
+            {"Term": "Return on equity (ROE)", "Definition": "Net income relative to shareholder equity; leverage can inflate it."},
+            {"Term": "Debt-to-equity", "Definition": "Debt relative to shareholder equity; acceptable levels vary by industry."},
+            {"Term": "Beta", "Definition": "Historical sensitivity to broad-market movements. Beta above 1 has historically moved more than the benchmark."},
+            {"Term": "Macro regime", "Definition": "Broad environment including market trend, rates, currency, commodities, and sector conditions."},
+            {"Term": "Delayed/end-of-day data", "Definition": "Not a live quote. Prices may be unsuitable for immediate execution decisions."},
+        ]
+        st.dataframe(pd.DataFrame(fundamental_rows), use_container_width=True, hide_index=True)
+        st.subheader("Important data limitations")
+        st.markdown(
+            "- A displayed **N/A** means the source field is unavailable.\n"
+            "- A neutral score caused by missing data is not evidence that the company is average.\n"
+            "- Dark-pool activity, options flow, dealer gamma, and live news sentiment are not currently connected.\n"
+            "- Backtests and historical relationships can fail when market structure or regime changes."
+        )
+
+    st.divider()
+    st.caption(
+        "Educational reference only. Trading can result in substantial loss. Verify prices, liquidity, corporate events, taxes, "
+        "transaction costs, and personal suitability independently before making a decision."
+    )
+
+
 with st.sidebar:
     st.markdown("## GPT AI Stocks Scanner")
     st.caption("Probabilistic Equity Intelligence")
-    page = st.radio("Workspace", ["AI Scanner", "Prediction Matrix", "Technical Terminal", "Accuracy Lab"])
+    page = st.radio(
+        "Workspace",
+        ["AI Scanner", "Prediction Matrix", "Technical Terminal", "Accuracy Lab", "Reference Guide"],
+    )
     st.divider()
     restore_browser_ticker_universe()
     raw = st.text_area(
@@ -634,7 +781,7 @@ with st.sidebar:
     st.divider()
     st.caption("Research decision support only. Not personalized investment advice. Validate liquidity, taxes, costs, and suitability independently.")
 
-if not tickers and page != "Accuracy Lab":
+if not tickers and page not in ("Accuracy Lab", "Reference Guide"):
     st.error("Enter at least one valid ticker in the sidebar.")
 elif page == "AI Scanner":
     scanner_page(tickers, max_position, risk_per_trade)
@@ -642,5 +789,7 @@ elif page == "Prediction Matrix":
     matrix_page(tickers, max_position, risk_per_trade)
 elif page == "Technical Terminal":
     terminal_page(tickers, max_position, risk_per_trade)
-else:
+elif page == "Accuracy Lab":
     accuracy_page()
+else:
+    reference_page()
