@@ -363,13 +363,18 @@ def scanner_page(tickers: list[str], max_position: float, risk_per_trade: float)
                         "Trend": a.components["trend"].score, "Momentum": a.components["momentum"].score,
                         "Volume": a.components["volume"].score, "RS": a.components["relative_strength"].score,
                         "Fundamental": a.components["fundamental"].score, "Position %": a.recommended_position_size,
-                        "Stage": a.trend_stage, "Stop": a.stop_loss, "Target 2": a.target_2})
+                        "Stage": a.trend_stage, "Stop": a.stop_loss, "Current Price": a.price,
+                        "Target-1": a.target_1, "Target-2": a.target_2})
     table = pd.DataFrame(records)
     st.subheader("Institutional ranking")
     st.dataframe(table, column_config={
         "AI Score": st.column_config.ProgressColumn("AI Score", min_value=0, max_value=100, format="%.1f"),
         "Bull %": st.column_config.ProgressColumn("Bull %", min_value=0, max_value=100, format="%.1f%%"),
         "Confidence %": st.column_config.ProgressColumn("Confidence %", min_value=0, max_value=100, format="%.1f%%"),
+        "Stop": st.column_config.NumberColumn("Stop", format="$%.2f"),
+        "Current Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
+        "Target-1": st.column_config.NumberColumn("Target-1", format="$%.2f"),
+        "Target-2": st.column_config.NumberColumn("Target-2", format="$%.2f"),
     }, use_container_width=True, hide_index=True, height=min(680, 42 + 35 * len(table)))
     export_cols = st.columns([1, 1, 5])
     export_cols[0].download_button("Export CSV", table.to_csv(index=False).encode(), "axiom_scanner.csv", "text/csv")
