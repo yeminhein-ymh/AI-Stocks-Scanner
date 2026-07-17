@@ -14,6 +14,14 @@ import streamlit.components.v1 as components
 
 from institutional.config import DATA_PROVIDERS, DEFAULT_UNIVERSE
 from institutional.data import DataUnavailable, fetch_metadata, fetch_prices, normalize_tickers
+from institutional.options import (
+    OptionsDataUnavailable,
+    OptionsSnapshot,
+    expected_move_table,
+    fetch_tradier_snapshot,
+    income_candidates,
+    options_summary,
+)
 from institutional.scoring import Analysis, analyze, price_indicators
 from institutional.signals import SignalStore, performance_metrics
 
@@ -83,6 +91,19 @@ def cached_analysis(ticker: str, max_position: float, risk_per_trade: float) -> 
         benchmark = None
     result = analyze(ticker, prices, benchmark, cached_metadata(ticker), max_position, risk_per_trade)
     return result, prices
+
+
+def tradier_token() -> str:
+    """Read a private options token without requiring a secrets file in local/test mode."""
+    try:
+        return str(st.secrets.get("TRADIER_TOKEN", "")).strip()
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_options_snapshot(ticker: str, spot: float) -> OptionsSnapshot:
+    return fetch_tradier_snapshot(ticker, tradier_token(), spot, max_expirations=6)
 
 
 def fmt(value: Any, kind: str = "number") -> str:
@@ -375,6 +396,80 @@ def prediction_gauge(score: float) -> go.Figure:
     fig.update_layout(height=300, margin=dict(l=35, r=35, t=60, b=25),
                       paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#334155"))
     return fig
+
+
+def options_heatmap(snapshot: OptionsSnapshot, measure: str, option_type: str) -> go.Figure:
+    frame = snapshot.contracts[
+        (snapshot.contracts["Type"] == option_type)
+        & snapshot.contracts["Moneyness %"].between(-35, 35)
+    ].copy()
+    if frame.empty:
+        frame = snapshot.contracts[snapshot.contracts["Type"] == option_type].copy()
+    pivot = frame.pivot_table(index="Strike", columns="Expiration", values=measure, aggfunc="sum", fill_value=0)
+    fig = go.Figure(go.Heatmap(
+        x=pivot.columns, y=pivot.index, z=pivot.values, colorscale="Teal",
+        colorbar={"title": measure},
+        hovertemplate=f"Expiration: %{{x}}<br>Strike: $%{{y:,.2f}}<br>{measure}: %{{z:,.0f}}<extra></extra>",
+    ))
+    fig.add_hline(y=snapshot.spot, line_dash="dash", line_color="#d99a20",
+                  annotation_text=f"Spot ${snapshot.spot:,.2f}")
+    fig.update_layout(
+        title=f"{option_type} {measure.lower()} by strike and expiration",
+        height=520, template="plotly_white", paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=55, r=30, t=60, b=55), xaxis_title="Expiration", yaxis_title="Strike",
+        font=dict(color="#334155", size=12),
+    )
+    return fig
+
+
+def institutional_probability_table(a: Analysis, prices: pd.DataFrame,
+                                    snapshot: OptionsSnapshot | None = None) -> pd.DataFrame:
+    """Create price-based horizon distributions, using option straddles for scale only when available."""
+    features = price_indicators(prices)
+    returns = features["RET1"].replace([np.inf, -np.inf], np.nan).dropna().tail(504)
+    sigma_daily = max(float(returns.std()) if len(returns) > 1 else 0.02, 0.004)
+    historical_mu = float(returns.tail(126).mean()) if not returns.empty else 0.0
+    score_mu = (a.overall_score - 50) / 50 * sigma_daily * 0.16
+    mu_daily = 0.65 * historical_mu + 0.35 * score_mu
+    option_moves = expected_move_table(snapshot) if snapshot is not None else pd.DataFrame()
+    normal_cdf = lambda value: 0.5 * (1 + erf(value / sqrt(2)))
+    rows: list[dict[str, Any]] = []
+    for label, days, confidence_decay in (
+        ("1 Day", 1, 0.88), ("3 Days", 3, 0.84), ("1 Week", 5, 0.80),
+        ("2 Weeks", 10, 0.74), ("1 Month", 21, 0.66), ("3 Months", 63, 0.52),
+    ):
+        expected = mu_daily * days
+        sigma = max(sigma_daily * sqrt(days), 0.001)
+        scale_source = "Historical realized volatility"
+        if not option_moves.empty:
+            closest = option_moves.iloc[(option_moves["DTE"] - days).abs().argsort()[:1]]
+            option_sigma = float(closest.iloc[0]["Expected Move %"]) / 100
+            option_dte = max(int(closest.iloc[0]["DTE"]), 1)
+            option_sigma = option_sigma * sqrt(days / option_dte)
+            sigma = 0.55 * sigma + 0.45 * max(option_sigma, 0.001)
+            scale_source = f"Realized volatility + {int(closest.iloc[0]['DTE'])}D ATM straddle"
+        neutral_band = 0.28 * sigma
+        bear = normal_cdf((-neutral_band - expected) / sigma)
+        bull = 1 - normal_cdf((neutral_band - expected) / sigma)
+        neutral = max(0.0, 1 - bull - bear)
+        low = max(0.0, a.price * (1 + expected - 1.2816 * sigma))
+        high = a.price * (1 + expected + 1.2816 * sigma)
+        confidence = float(np.clip(a.confidence * confidence_decay, 10, 85))
+        rows.append({
+            "Timeframe": label,
+            "Days": days,
+            "Bull %": round(bull * 100, 1),
+            "Neutral %": round(neutral * 100, 1),
+            "Bear %": round(bear * 100, 1),
+            "Expected Return %": round(expected * 100, 2),
+            "Expected Move %": round(sigma * 100, 2),
+            "Expected Low": round(low, 2),
+            "Expected High": round(high, 2),
+            "Confidence %": round(confidence, 1),
+            "Volatility Scale": scale_source,
+            "Directional Source": "Price, trend, momentum and relative strength—not option-trade intent",
+        })
+    return pd.DataFrame(rows)
 
 
 def short_term_risk_table(a: Analysis, prices: pd.DataFrame, metadata: dict[str, Any]) -> pd.DataFrame:
@@ -953,6 +1048,246 @@ def short_term_prediction_page(tickers: list[str], max_position: float, risk_per
         st.dataframe(feature_status, use_container_width=True, hide_index=True)
 
 
+def smart_money_page(tickers: list[str], max_position: float, risk_per_trade: float) -> None:
+    header(
+        "Smart Money Prediction Engine",
+        "Source-aware options positioning, expected-move analysis, institutional-intent controls, and multi-horizon probability context.",
+    )
+    ticker = st.selectbox("Security", tickers, key="smart_money_ticker")
+    try:
+        a, prices = cached_analysis(ticker, max_position, risk_per_trade)
+    except Exception as exc:
+        st.error(f"The connected price source could not analyze {ticker}: {exc}")
+        return
+
+    token = tradier_token()
+    snapshot: OptionsSnapshot | None = None
+    options_error = "TRADIER_TOKEN is not configured in Streamlit Secrets."
+    if token:
+        try:
+            snapshot = cached_options_snapshot(ticker, a.price)
+            options_error = ""
+        except OptionsDataUnavailable as exc:
+            options_error = str(exc)
+        except Exception as exc:
+            options_error = f"The options source failed safely: {exc}"
+
+    forecast = institutional_probability_table(a, prices, snapshot)
+    one_day = forecast.iloc[0]
+    chain_status = "Connected" if snapshot is not None else "Not connected"
+    options_coverage = 35.0 if snapshot is not None else 0.0
+    metric_grid([
+        ("Current price", fmt(a.price, "price")),
+        ("Institutional bias", "Withheld"),
+        ("Trade-print confidence", "N/A"),
+        ("Option chain", chain_status),
+        ("Price/technical bias", a.classification),
+        ("Options evidence coverage", fmt(options_coverage, "pct")),
+    ], 3)
+    freshness(a.as_of)
+
+    if snapshot is None:
+        st.warning(
+            f"Institutional options conclusions are withheld: {options_error} "
+            "The page will not convert missing trade-level evidence into synthetic smart-money activity."
+        )
+    else:
+        st.success(
+            f"Tradier option chain connected · {len(snapshot.contracts):,} contracts across "
+            f"{snapshot.contracts['Expiration'].nunique()} expirations · snapshot requested {snapshot.as_of}."
+        )
+        st.info(
+            "A chain snapshot shows quotes, volume, open interest, IV and Greeks. It does not identify which side initiated a trade, "
+            "whether it opened or closed, or whether several legs belong to one institutional order."
+        )
+
+    summary_tab, heatmap_tab, decoder_tab, income_tab, probability_tab, audit_tab = st.tabs([
+        "Smart Money Summary", "Options Heat Map", "Institutional Decoder",
+        "Income Opportunities", "Probability & Accuracy", "Source Audit",
+    ])
+
+    with summary_tab:
+        left, right = st.columns([0.8, 1.4])
+        with left:
+            st.plotly_chart(prediction_gauge(a.overall_score), use_container_width=True,
+                            key="smart_money_technical_gauge")
+            st.caption("This gauge is price/fundamental/macro context—not an institutional-flow score.")
+        with right:
+            st.plotly_chart(short_term_probability_chart(forecast), use_container_width=True,
+                            key="smart_money_probability_chart")
+        st.subheader("Evidence-based conclusion")
+        st.markdown(
+            f"**Institutional intent: withheld.** The connected price model classifies **{ticker}** as "
+            f"**{a.classification}** with an overall score of **{a.overall_score:.1f}/100**. "
+            f"The price-based 1-day distribution is **{one_day['Bull %']:.1f}% bull / "
+            f"{one_day['Neutral %']:.1f}% neutral / {one_day['Bear %']:.1f}% bear**. "
+            "This is not evidence that institutions are accumulating, distributing or hedging."
+        )
+        if snapshot is not None:
+            summary = options_summary(snapshot)
+            moves = expected_move_table(snapshot)
+            nearest_move = float(moves.iloc[0]["Expected Move %"]) if not moves.empty else np.nan
+            metric_grid([
+                ("Contracts analyzed", f"{int(summary['Contracts']):,}"),
+                ("Put/Call volume", fmt(summary["Put/Call Volume"])),
+                ("Put/Call open interest", fmt(summary["Put/Call OI"])),
+                ("Median bid/ask spread", fmt(summary["Median Spread %"], "pct")),
+                ("Nearest ATM expected move", fmt(nearest_move, "pct")),
+                ("Call volume share", fmt(summary["Call Volume Share %"], "pct")),
+            ], 3)
+            st.caption(
+                "Put/call ratios describe contract activity and positioning—not buyer-initiated bullish or seller-initiated bearish direction. "
+                "ATM straddle cost is used as a market-implied move scale, not a directional forecast."
+            )
+
+    with heatmap_tab:
+        if snapshot is None:
+            st.info("Connect Tradier to display strike-by-expiration heat maps from a real option chain.")
+        else:
+            control_1, control_2 = st.columns(2)
+            option_type = control_1.radio("Option type", ["Call", "Put"], horizontal=True,
+                                          key="smart_heatmap_type")
+            measure = control_2.selectbox(
+                "Heat-map measure", ["Open Interest", "Volume", "Quoted Activity $"],
+                key="smart_heatmap_measure",
+            )
+            st.plotly_chart(options_heatmap(snapshot, measure, option_type), use_container_width=True,
+                            key="smart_money_heatmap")
+            activity = snapshot.contracts.sort_values("Quoted Activity $", ascending=False).head(25).copy()
+            st.subheader("Largest quoted contract activity")
+            st.dataframe(activity[[
+                "Contract", "Type", "Expiration", "DTE", "Strike", "Bid", "Ask", "Mid",
+                "Volume", "Open Interest", "IV %", "Delta", "Quoted Activity $",
+            ]], use_container_width=True, hide_index=True)
+            st.warning(
+                "Quoted Activity $ = midpoint × reported volume × 100. It is not confirmed premium paid, a block-trade record, "
+                "or proof of institutional direction."
+            )
+
+    with decoder_tab:
+        decoder_rows = [
+            {"Detection": "Large contract activity", "Status": "Partial" if snapshot is not None else "Unavailable",
+             "Required evidence": "Chain volume and midpoint; not trade-level premium"},
+            {"Detection": "Aggressive ask buying / bid selling", "Status": "Unavailable",
+             "Required evidence": "Timestamped prints aligned to NBBO"},
+            {"Detection": "Blocks, sweeps and split orders", "Status": "Unavailable",
+             "Required evidence": "OPRA prints, exchange routing and condition codes"},
+            {"Detection": "Opening versus closing", "Status": "Unavailable",
+             "Required evidence": "Open/close classification or next-session OI reconciliation"},
+            {"Detection": "Multi-leg spreads and rolls", "Status": "Unavailable",
+             "Required evidence": "Complex-order identifiers and synchronized legs"},
+            {"Detection": "Covered call / cash-secured put intent", "Status": "Unavailable",
+             "Required evidence": "Stock position plus trade side, opening status and complete option legs"},
+            {"Detection": "Hedge versus directional speculation", "Status": "Unavailable",
+             "Required evidence": "Portfolio context, delta exposure and complete order structure"},
+            {"Detection": "Recurring whale identity", "Status": "Not observable",
+             "Required evidence": "Public options tape does not reveal beneficial owner identity"},
+        ]
+        st.dataframe(pd.DataFrame(decoder_rows), use_container_width=True, hide_index=True)
+        st.subheader("Institutional Trade Decoder")
+        st.markdown(
+            "The decoder will produce **Most Likely Strategy**, **Alternative Possibilities**, **Estimated Intent**, "
+            "**Bullish/Hedging/Volatility probabilities**, and a reason audit only after the required trade-level source is connected."
+        )
+        st.error(
+            "No individual contract or large premium amount should be labeled institutional, bullish, bearish, opening, closing, "
+            "covered, cash-secured or hedging from an option-chain snapshot alone."
+        )
+
+    with income_tab:
+        st.caption(
+            "These are mechanical quote screens inspired by seller dashboards. They are not smart-money detections or trade recommendations."
+        )
+        if snapshot is None:
+            st.info("Connect Tradier to calculate cash-secured-put and covered-call candidates from executable bid quotations.")
+        else:
+            minimum_oi = st.number_input("Minimum open interest", 0, 10000, 100, 50,
+                                         key="income_min_oi")
+            maximum_spread = st.slider("Maximum bid/ask spread (%)", 2.0, 50.0, 20.0, 1.0,
+                                       key="income_max_spread")
+            cash_puts = income_candidates(snapshot, "Cash-Secured Put", minimum_oi, maximum_spread)
+            covered_calls = income_candidates(snapshot, "Covered Call", minimum_oi, maximum_spread)
+            st.subheader("Cash-secured put candidates")
+            if cash_puts.empty:
+                st.info("No contracts meet the current DTE, liquidity and spread controls.")
+            else:
+                st.dataframe(cash_puts, use_container_width=True, hide_index=True)
+            st.subheader("Covered-call candidates")
+            if covered_calls.empty:
+                st.info("No contracts meet the current DTE, liquidity and spread controls.")
+            else:
+                st.dataframe(covered_calls, use_container_width=True, hide_index=True)
+            st.warning(
+                "The delta-based OTM figure is a rough screening proxy—not a calibrated probability of profit. "
+                "Covered calls retain substantial stock downside and cap upside above the strike."
+            )
+
+    with probability_tab:
+        st.subheader("Multi-horizon probability table")
+        st.dataframe(forecast, column_config={
+            "Bull %": st.column_config.ProgressColumn("Bull %", min_value=0, max_value=100, format="%.1f%%"),
+            "Neutral %": st.column_config.ProgressColumn("Neutral %", min_value=0, max_value=100, format="%.1f%%"),
+            "Bear %": st.column_config.ProgressColumn("Bear %", min_value=0, max_value=100, format="%.1f%%"),
+            "Confidence %": st.column_config.ProgressColumn("Confidence %", min_value=0, max_value=100, format="%.1f%%"),
+            "Expected Low": st.column_config.NumberColumn("Expected Low", format="$%.2f"),
+            "Expected High": st.column_config.NumberColumn("Expected High", format="$%.2f"),
+        }, use_container_width=True, hide_index=True)
+        st.caption(
+            "Direction comes from connected price, trend, momentum and relative-strength evidence. When available, ATM option straddles "
+            "adjust the expected-move scale only; they do not create a bullish or bearish vote."
+        )
+        if snapshot is not None:
+            st.subheader("Option-implied expected-move ladder")
+            st.dataframe(expected_move_table(snapshot), use_container_width=True, hide_index=True)
+        with st.expander("Prediction storage and calibration", expanded=True):
+            st.markdown(
+                "Store the six horizon forecasts in Accuracy Lab, then close them with realized outcomes. "
+                "Brier score and probability calibration require the full saved probability vector; the current signal database stores "
+                "direction and confidence and will need a versioned probability schema before automated model reweighting is enabled."
+            )
+            if st.button("Store six research horizons", key="store_smart_money_context"):
+                store = SignalStore()
+                inserted = 0
+                signal_date = datetime.now(timezone.utc).date().isoformat()
+                strategy = "Options-Scaled Context" if snapshot is not None else "Price Context"
+                for _, row in forecast.iterrows():
+                    direction = max(("Bullish", row["Bull %"]), ("Sideways", row["Neutral %"]),
+                                    ("Bearish", row["Bear %"]), key=lambda item: item[1])[0]
+                    if store.record({
+                        "signal_date": signal_date, "ticker": ticker, "strategy": strategy,
+                        "prediction": direction, "entry": a.price,
+                        "target": a.price * (1 + float(row["Expected Return %"]) / 100),
+                        "stop": float(row["Expected Low"]), "confidence": float(row["Confidence %"]),
+                        "horizon_days": int(row["Days"]),
+                    }):
+                        inserted += 1
+                st.success(f"Stored {inserted} new research horizons; same-day duplicates were skipped.")
+
+    with audit_tab:
+        source_rows = [
+            {"Evidence": "Price and technical", "Status": "Connected", "What is valid": "Trend, momentum, volume, relative strength and realized volatility"},
+            {"Evidence": "Option-chain quotes and Greeks", "Status": chain_status,
+             "What is valid": "Bid/ask, midpoint, volume, OI, IV and Greeks" if snapshot is not None else "Requires TRADIER_TOKEN"},
+            {"Evidence": "Historical IV / IV rank / OI change", "Status": "Not connected", "What is valid": "Requires historical options snapshots"},
+            {"Evidence": "Trade prints and NBBO", "Status": "Not connected", "What is valid": "Required for aggressor-side and premium-at-print analysis"},
+            {"Evidence": "Complex orders and trade conditions", "Status": "Not connected", "What is valid": "Required for spreads, rolls, sweeps and multi-leg intent"},
+            {"Evidence": "Live news and event intelligence", "Status": "Not connected", "What is valid": "Earnings metadata only when Yahoo supplies it"},
+            {"Evidence": "Macro", "Status": "Partial", "What is valid": "SPY long-term trend proxy; full VIX/rates/dollar/commodities not connected"},
+            {"Evidence": "Trained ML ensemble", "Status": "Not connected", "What is valid": "Statistical distribution only; no claimed XGBoost/LSTM/Transformer model"},
+        ]
+        st.dataframe(pd.DataFrame(source_rows), use_container_width=True, hide_index=True)
+        with st.expander("Connect the Tradier option chain", expanded=snapshot is None):
+            st.markdown(
+                "Add the token in **Streamlit Cloud → Manage app → Settings → Secrets**. Never upload it to GitHub."
+            )
+            st.code('TRADIER_TOKEN = "your-private-token"', language="toml")
+            st.markdown("API reference: https://docs.tradier.com/reference/brokerage-api-markets-get-options-chains")
+        st.caption(
+            "For production institutional decoding, connect a licensed trade-level OPRA/NBBO source such as Cboe LiveVol or another "
+            "provider that supplies trade conditions, exchange routing and complex-order context."
+        )
+
+
 def accuracy_page() -> None:
     header("Signal Accuracy & Feedback Loop", "Immutable predictions become labeled outcomes; performance is evaluated by strategy and regime, not headline accuracy alone.")
     store = SignalStore()
@@ -1008,8 +1343,8 @@ def reference_page() -> None:
     learning_cols[2].markdown("**3 · Risk plan**\n\nSet entry, stop, targets, and position size.")
     learning_cols[3].markdown("**4 · Review**\n\nRecord the result and improve the process.")
 
-    trend_tab, indicator_tab, scanner_tab, risk_tab, fundamental_tab = st.tabs([
-        "Trend stages", "Indicators", "Scanner scores", "Risk & execution", "Fundamentals & data",
+    trend_tab, indicator_tab, scanner_tab, risk_tab, fundamental_tab, options_tab = st.tabs([
+        "Trend stages", "Indicators", "Scanner scores", "Risk & execution", "Fundamentals & data", "Options & smart money",
     ])
 
     with trend_tab:
@@ -1128,6 +1463,28 @@ def reference_page() -> None:
             "- Backtests and historical relationships can fail when market structure or regime changes."
         )
 
+    with options_tab:
+        option_rows = [
+            {"Term": "Option chain", "Definition": "Available calls and puts by strike and expiration, including quotations, volume, open interest, IV and Greeks when supplied."},
+            {"Term": "Implied volatility (IV)", "Definition": "Volatility level implied by the option price under a pricing model; it is not a directional forecast."},
+            {"Term": "Delta", "Definition": "Estimated option-price change for a $1 underlying move, all else equal. Absolute delta is only a rough probability proxy."},
+            {"Term": "Gamma", "Definition": "Estimated change in delta for a $1 underlying move."},
+            {"Term": "Theta", "Definition": "Modeled option value lost to one day of time decay, all else equal."},
+            {"Term": "Vega", "Definition": "Estimated option-price sensitivity to a one-point change in implied volatility."},
+            {"Term": "Open interest", "Definition": "Outstanding contracts after clearing; it does not reveal whether holders are bullish, bearish, long or short."},
+            {"Term": "Put/Call ratio", "Definition": "Put activity divided by call activity. It describes contract mix, not trade aggressor or institutional intent."},
+            {"Term": "ATM straddle expected move", "Definition": "Approximate move scale from the midpoint cost of an at-the-money call plus put; not a guaranteed range."},
+            {"Term": "Cash-secured put", "Definition": "Short put backed by enough cash to buy 100 shares per contract if assigned; downside can be substantial."},
+            {"Term": "Covered call", "Definition": "Short call against 100 owned shares; premium lowers cost basis but stock downside remains and upside is capped."},
+            {"Term": "Sweep / block / multi-leg order", "Definition": "Trade-print classifications that require timestamped executions, NBBO, exchange and condition/complex-order data—not a chain snapshot."},
+            {"Term": "Probability of profit", "Definition": "Model-estimated chance the complete position finishes profitable. It is different from probability the option expires OTM."},
+        ]
+        st.dataframe(pd.DataFrame(option_rows), use_container_width=True, hide_index=True)
+        st.warning(
+            "A large option contract, premium estimate, volume spike or open-interest concentration does not identify the trader, "
+            "position direction, opening/closing status, hedge relationship or institutional intent by itself."
+        )
+
     st.divider()
     st.caption(
         "Educational reference only. Trading can result in substantial loss. Verify prices, liquidity, corporate events, taxes, "
@@ -1141,7 +1498,7 @@ with st.sidebar:
     page = st.radio(
         "Workspace",
         ["AI Scanner", "Prediction Matrix", "Technical Terminal", "Accuracy Lab",
-         "Short-Term Prediction", "Reference Guide"],
+         "Short-Term Prediction", "Smart Money Options", "Reference Guide"],
     )
     st.divider()
     restore_browser_ticker_universe()
@@ -1173,5 +1530,7 @@ elif page == "Accuracy Lab":
     accuracy_page()
 elif page == "Short-Term Prediction":
     short_term_prediction_page(tickers, max_position, risk_per_trade)
+elif page == "Smart Money Options":
+    smart_money_page(tickers, max_position, risk_per_trade)
 else:
     reference_page()

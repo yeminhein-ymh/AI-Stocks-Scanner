@@ -33,6 +33,16 @@ The app needs outbound network access for Yahoo Finance. Quotes are delayed/end-
 
 Connect licensed feeds for dark pools, options flow, open-interest change, dealer gamma, short interest, live news, analyst estimates, economic calendars, and institutional ownership. Model retraining should run outside the Streamlit process using purged walk-forward validation, point-in-time features, transaction costs, drift monitoring, and champion/challenger promotion.
 
+### Optional Tradier option chain
+
+The **Smart Money Options** page can use Tradier option-chain quotes, volume, open interest, IV, and Greeks. Add the token to Streamlit Secrets; never commit it to GitHub:
+
+```toml
+TRADIER_TOKEN = "your-private-token"
+```
+
+An option chain does not identify trade aggressor, opening/closing status, multi-leg relationships, or institutional ownership. Those conclusions remain withheld until a licensed trade-level OPRA/NBBO source is connected.
+
 ## Tests
 
 ```powershell

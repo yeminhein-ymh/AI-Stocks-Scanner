@@ -24,10 +24,10 @@ SCORE_WEIGHTS = {
 DATA_PROVIDERS = {
     "price": "Yahoo Finance via yfinance (delayed/end-of-day; provider terms apply)",
     "fundamental": "Yahoo Finance company metadata (availability varies)",
+    "options_chain": None,
     "dark_pool": None,
     "options_flow": None,
     "dealer_gamma": None,
     "analyst_consensus": None,
     "news_sentiment": None,
 }
-
