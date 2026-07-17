@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from institutional.config import DATA_PROVIDERS, DEFAULT_UNIVERSE
 from institutional.data import DataUnavailable, fetch_metadata, fetch_prices, normalize_tickers
@@ -18,6 +20,10 @@ from institutional.signals import SignalStore, performance_metrics
 st.set_page_config(page_title="Axiom AI Research", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
 
 TICKER_LIMIT = 30
+TICKER_STORAGE = components.declare_component(
+    "ticker_storage",
+    path=str(Path(__file__).parent / "ticker_storage"),
+)
 
 CSS = """
 <style>
@@ -115,10 +121,39 @@ def saved_ticker_universe() -> str:
 
 
 def persist_ticker_universe() -> None:
-    """Save additions and deletions so normal browser refreshes keep the list."""
+    """Replace the saved universe with the user's latest edited list."""
     raw = st.session_state.get("ticker_universe", "")
     tickers = normalize_tickers(raw, limit=TICKER_LIMIT)
+    st.session_state["ticker_universe"] = ", ".join(tickers)
     st.query_params["tickers"] = ",".join(tickers)
+
+
+def restore_browser_ticker_universe() -> None:
+    """Restore the latest browser-local list once, including a deliberately empty list."""
+    if "ticker_universe" not in st.session_state:
+        st.session_state["ticker_universe"] = saved_ticker_universe()
+
+    storage_loaded = st.session_state.get("ticker_storage_loaded", False)
+    storage_state = TICKER_STORAGE(
+        value=st.session_state["ticker_universe"],
+        write=storage_loaded,
+        default=None,
+        key="ticker_storage_bridge",
+    )
+    if storage_loaded or not isinstance(storage_state, dict):
+        return
+
+    if storage_state.get("found"):
+        stored = ", ".join(
+            normalize_tickers(str(storage_state.get("value", "")), limit=TICKER_LIMIT)
+        )
+        st.session_state["ticker_universe"] = stored
+        st.query_params["tickers"] = ",".join(normalize_tickers(stored, limit=TICKER_LIMIT))
+
+    # When no browser value exists, the URL/default value is written on the next
+    # run. When a value exists, it has already replaced the temporary fallback.
+    st.session_state["ticker_storage_loaded"] = True
+    st.rerun()
 
 
 def probability_chart(a: Analysis) -> go.Figure:
@@ -582,8 +617,7 @@ with st.sidebar:
     st.caption("Probabilistic Equity Intelligence")
     page = st.radio("Workspace", ["AI Scanner", "Prediction Matrix", "Technical Terminal", "Accuracy Lab"])
     st.divider()
-    if "ticker_universe" not in st.session_state:
-        st.session_state["ticker_universe"] = saved_ticker_universe()
+    restore_browser_ticker_universe()
     raw = st.text_area(
         "Universe (comma-separated)",
         key="ticker_universe",
