@@ -43,10 +43,10 @@ CSS = """
 [data-testid="stHeader"] { background:rgba(251,252,254,.94); }
 [data-testid="stSidebar"] { background:#edf3f8; border-right:1px solid var(--line); }
 [data-testid="stSidebar"] * { color:#334155; }
-[data-testid="stMetric"] { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:11px 12px; box-shadow:0 3px 12px rgba(30,55,80,.05); }
+[data-testid="stMetric"] { min-width:0; height:100%; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:11px 12px; box-shadow:0 3px 12px rgba(30,55,80,.05); }
 [data-testid="stMetricLabel"] { color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
 [data-testid="stMetricLabel"] p { font-size:.68rem !important; line-height:1.2 !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
-[data-testid="stMetricValue"], [data-testid="stMetricValue"] > div { color:#1f2f44; font-size:1.62rem !important; line-height:1.15 !important; white-space:nowrap !important; overflow:visible !important; text-overflow:clip !important; }
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] > div, [data-testid="stMetricValue"] * { color:#1f2f44 !important; font-size:1.35rem !important; line-height:1.18 !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; overflow-wrap:break-word !important; word-break:normal !important; }
 [data-testid="stMetricDelta"], [data-testid="stMetricDelta"] * { font-size:.70rem !important; line-height:1.2 !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
 .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp p, .stApp label { color:var(--ink); }
 .block-container { padding-top:1.5rem; max-width:1600px; }
@@ -114,6 +114,14 @@ def excel_bytes(frame: pd.DataFrame) -> bytes | None:
 def header(title: str, subtitle: str) -> None:
     st.markdown('<div class="eyebrow">Axiom Intelligence Engine</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="hero">{title}</div><div class="subtle">{subtitle}</div>', unsafe_allow_html=True)
+
+
+def metric_grid(items: list[tuple[str, str]], columns_per_row: int) -> None:
+    """Render readable metric cards in bounded-width rows."""
+    for start in range(0, len(items), columns_per_row):
+        row = st.columns(columns_per_row)
+        for column, (label, value) in zip(row, items[start:start + columns_per_row]):
+            column.metric(label, value)
 
 
 def freshness(as_of: str) -> None:
@@ -805,13 +813,14 @@ def short_term_prediction_page(tickers: list[str], max_position: float, risk_per
     else:
         bias = "Neutral"
 
-    hero_cols = st.columns(6)
-    hero_cols[0].metric("Current price", fmt(a.price, "price"))
-    hero_cols[1].metric("Overall bias", bias)
-    hero_cols[2].metric("1-day bull", fmt(one_day["Bull %"], "pct"))
-    hero_cols[3].metric("1-day confidence", fmt(one_day["Confidence %"], "pct"))
-    hero_cols[4].metric("2-week expected return", f"{two_weeks['Expected Return %']:+.2f}%")
-    hero_cols[5].metric("Connected evidence", fmt(effective_coverage * 100, "pct"))
+    metric_grid([
+        ("Current price", fmt(a.price, "price")),
+        ("Overall bias", bias),
+        ("1-day bull", fmt(one_day["Bull %"], "pct")),
+        ("1-day confidence", fmt(one_day["Confidence %"], "pct")),
+        ("2-week expected return", f"{two_weeks['Expected Return %']:+.2f}%"),
+        ("Connected evidence", fmt(effective_coverage * 100, "pct")),
+    ], 3)
 
     gauge_col, probability_col = st.columns([0.8, 1.4])
     with gauge_col:
@@ -837,24 +846,26 @@ def short_term_prediction_page(tickers: list[str], max_position: float, risk_per
             "Expected Low": st.column_config.NumberColumn("Expected Low", format="$%.2f"),
         }, use_container_width=True, hide_index=True)
         st.subheader("Trade plan")
-        trade_cols = st.columns(6)
-        for col, label, value in zip(
-            trade_cols,
-            ["Stop", "Current Price", "Target-1", "Target-2", "Target-3", "Trailing Stop"],
-            [a.stop_loss, a.price, a.target_1, a.target_2, a.target_3, a.trailing_stop],
-        ):
-            col.metric(label, fmt(value, "price"))
+        metric_grid([
+            ("Stop", fmt(a.stop_loss, "price")),
+            ("Current Price", fmt(a.price, "price")),
+            ("Target-1", fmt(a.target_1, "price")),
+            ("Target-2", fmt(a.target_2, "price")),
+            ("Target-3", fmt(a.target_3, "price")),
+            ("Trailing Stop", fmt(a.trailing_stop, "price")),
+        ], 3)
         st.caption(
             f"Reward/risk: {a.reward_risk:.2f}:1 · Kelly estimate: {a.kelly_fraction:.2f}% · "
             f"Suggested position after configured caps: {a.recommended_position_size:.2f}%"
         )
 
     with evidence_tab:
-        meter_cols = st.columns(4)
-        meter_cols[0].metric("Technical score", f"{technical_score:.1f} / 100")
-        meter_cols[1].metric("Volume score", f"{a.components['volume'].score:.1f} / 100")
-        meter_cols[2].metric("News sentiment", "Not connected")
-        meter_cols[3].metric("Institutional activity", "Not connected")
+        metric_grid([
+            ("Technical score", f"{technical_score:.1f} / 100"),
+            ("Volume score", f"{a.components['volume'].score:.1f} / 100"),
+            ("News sentiment", "Not connected"),
+            ("Institutional activity", "Not connected"),
+        ], 2)
         st.subheader("Weighted ensemble audit")
         st.dataframe(module_table, column_config={
             "Coverage %": st.column_config.ProgressColumn("Coverage %", min_value=0, max_value=100, format="%.1f%%"),
