@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timezone
+from math import erf, sqrt
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,16 @@ from institutional.signals import SignalStore, performance_metrics
 st.set_page_config(page_title="Axiom AI Research", page_icon="◈", layout="wide", initial_sidebar_state="expanded")
 
 TICKER_LIMIT = 30
+SHORT_TERM_WEIGHTS = {
+    "Technical Analysis": 25.0,
+    "Volume & Price Action": 15.0,
+    "Options Flow": 15.0,
+    "News & Sentiment": 15.0,
+    "Fundamental Momentum": 10.0,
+    "Sector Rotation": 8.0,
+    "Macro Economy": 7.0,
+    "AI / Statistical Model": 5.0,
+}
 TICKER_STORAGE = components.declare_component(
     "ticker_storage",
     path=str(Path(__file__).parent / "ticker_storage"),
@@ -265,6 +276,135 @@ def component_reference_chart(name: str, a: Analysis, features: pd.DataFrame,
         font=dict(color="#334155", size=12), xaxis_gridcolor="#e2e8f0", yaxis_gridcolor="#e2e8f0",
     )
     return fig, caption
+
+
+def short_term_probability_table(a: Analysis, prices: pd.DataFrame, ensemble_score: float,
+                                 effective_coverage: float) -> pd.DataFrame:
+    """Create source-aware distribution forecasts without claiming certainty."""
+    features = price_indicators(prices)
+    returns = features["RET1"].replace([np.inf, -np.inf], np.nan).dropna().tail(252)
+    sigma_daily = max(float(returns.std()) if len(returns) > 1 else 0.02, 0.004)
+    historical_mu = float(returns.tail(60).mean()) if not returns.empty else 0.0
+    score_mu = (ensemble_score - 50) / 50 * sigma_daily * 0.18
+    mu_daily = 0.60 * historical_mu + 0.40 * score_mu
+    base_confidence = a.confidence * (0.50 + 0.50 * effective_coverage)
+
+    normal_cdf = lambda value: 0.5 * (1 + erf(value / sqrt(2)))
+    rows: list[dict[str, Any]] = []
+    for label, days, decay in (("1 Trading Day", 1, 1.00), ("3 Trading Days", 3, 0.96),
+                               ("1 Week", 5, 0.92), ("2 Weeks", 10, 0.85)):
+        expected = mu_daily * days
+        sigma = max(sigma_daily * sqrt(days), 0.001)
+        neutral_band = 0.28 * sigma
+        bear = normal_cdf((-neutral_band - expected) / sigma)
+        bull = 1 - normal_cdf((neutral_band - expected) / sigma)
+        neutral = max(0.0, 1 - bull - bear)
+        z80 = 1.2816
+        expected_high = a.price * (1 + expected + z80 * sigma)
+        expected_low = max(0.0, a.price * (1 + expected - z80 * sigma))
+
+        def probability_above(threshold: float) -> float:
+            return (1 - normal_cdf((threshold - expected) / sigma)) * 100
+
+        def probability_below(threshold: float) -> float:
+            return normal_cdf((threshold - expected) / sigma) * 100
+
+        rows.append({
+            "Timeframe": label,
+            "Days": days,
+            "Bull %": round(bull * 100, 1),
+            "Neutral %": round(neutral * 100, 1),
+            "Bear %": round(bear * 100, 1),
+            "Expected Return %": round(expected * 100, 2),
+            "Expected Move %": round(sigma * 100, 2),
+            "Expected High": round(expected_high, 2),
+            "Expected Low": round(expected_low, 2),
+            "80% Range": f"${expected_low:,.2f} – ${expected_high:,.2f}",
+            "Max Drawdown est. %": round(-1.65 * sigma * 100, 2),
+            "P(+5%)": round(probability_above(0.05), 1),
+            "P(-5%)": round(probability_below(-0.05), 1),
+            "P(+10%)": round(probability_above(0.10), 1),
+            "P(-10%)": round(probability_below(-0.10), 1),
+            "Confidence %": round(float(np.clip(base_confidence * decay, 10, 92)), 1),
+        })
+    return pd.DataFrame(rows)
+
+
+def short_term_probability_chart(forecast: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    palette = {"Bull %": "#159487", "Neutral %": "#b8c5d1", "Bear %": "#d99a20"}
+    for column in ("Bull %", "Neutral %", "Bear %"):
+        fig.add_bar(
+            y=forecast["Timeframe"], x=forecast[column], name=column.replace(" %", ""),
+            orientation="h", marker=dict(color=palette[column], line=dict(color="#ffffff", width=1)),
+            text=forecast[column].map(lambda value: f"{value:.1f}%"), textposition="inside",
+            hovertemplate=f"%{{y}} · {column.replace(' %', '')}: %{{x:.1f}}%<extra></extra>",
+        )
+    fig.update_layout(
+        title="Directional probability by forecast horizon", barmode="stack", height=330,
+        template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#ffffff",
+        xaxis=dict(title="Probability (%)", range=[0, 100], gridcolor="#e2e8f0"),
+        yaxis=dict(autorange="reversed"), legend=dict(orientation="h", y=1.08, x=0),
+        margin=dict(l=25, r=20, t=65, b=40), font=dict(color="#334155", size=12),
+    )
+    return fig
+
+
+def prediction_gauge(score: float) -> go.Figure:
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number", value=score, number={"suffix": " / 100"},
+        title={"text": "Source-aware ensemble score"},
+        gauge={
+            "axis": {"range": [0, 100]}, "bar": {"color": "#159487"},
+            "steps": [
+                {"range": [0, 40], "color": "#f6e8df"},
+                {"range": [40, 60], "color": "#eef2f6"},
+                {"range": [60, 100], "color": "#d8eee9"},
+            ],
+            "threshold": {"line": {"color": "#172b4d", "width": 3}, "value": 50},
+        },
+    ))
+    fig.update_layout(height=300, margin=dict(l=35, r=35, t=60, b=25),
+                      paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#334155"))
+    return fig
+
+
+def short_term_risk_table(a: Analysis, prices: pd.DataFrame, metadata: dict[str, Any]) -> pd.DataFrame:
+    features = price_indicators(prices)
+    recent = features.tail(60)
+    atr_pct = float(a.metrics.get("ATR %", np.nan))
+    gaps = (recent["Open"] / recent["Close"].shift(1) - 1).abs().dropna()
+    gap95 = float(gaps.quantile(0.95) * 100) if not gaps.empty else float("nan")
+    dollar_volume = float((recent["Close"] * recent["Volume"]).tail(20).mean())
+
+    volatility_level = "High" if atr_pct >= 4 else "Medium" if atr_pct >= 2 else "Low"
+    gap_level = "High" if gap95 >= 4 else "Medium" if gap95 >= 2 else "Low"
+    liquidity_level = "High" if dollar_volume < 10_000_000 else "Medium" if dollar_volume < 50_000_000 else "Low"
+    market_level = "High" if a.components["macro"].score < 40 else "Medium" if a.components["macro"].score < 55 else "Low"
+
+    earnings_value = metadata.get("earningsTimestamp") or metadata.get("earningsTimestampStart")
+    earnings_level, earnings_detail = "Unscored", "Earnings date unavailable; verify independently."
+    try:
+        earnings_date = datetime.fromtimestamp(float(earnings_value), tz=timezone.utc)
+        days_to_earnings = (earnings_date.date() - datetime.now(timezone.utc).date()).days
+        if 0 <= days_to_earnings <= 14:
+            earnings_level = "High"
+        elif 14 < days_to_earnings <= 45:
+            earnings_level = "Medium"
+        elif days_to_earnings > 45:
+            earnings_level = "Low"
+        earnings_detail = f"Reported earnings date: {earnings_date.date().isoformat()} ({days_to_earnings} days)."
+    except (TypeError, ValueError, OSError):
+        pass
+
+    return pd.DataFrame([
+        {"Risk": "Event risk", "Level": "Unscored", "Evidence": "Live news and event feed is not connected."},
+        {"Risk": "Earnings risk", "Level": earnings_level, "Evidence": earnings_detail},
+        {"Risk": "Gap risk", "Level": gap_level, "Evidence": f"60-session 95th percentile absolute overnight gap: {gap95:.2f}%."},
+        {"Risk": "Liquidity risk", "Level": liquidity_level, "Evidence": f"Average 20-day dollar volume: ${dollar_volume:,.0f}."},
+        {"Risk": "Volatility risk", "Level": volatility_level, "Evidence": f"ATR(14) is {atr_pct:.2f}% of price."},
+        {"Risk": "Market risk", "Level": market_level, "Evidence": a.components["macro"].reasons[0]},
+    ])
 
 
 def thesis(a: Analysis, meta: dict[str, Any]) -> str:
@@ -579,6 +719,229 @@ def terminal_page(tickers: list[str], max_position: float, risk_per_trade: float
         st.warning("Unavailable datasets are never replaced with synthetic institutional-flow claims.")
 
 
+def short_term_prediction_page(tickers: list[str], max_position: float, risk_per_trade: float) -> None:
+    header(
+        "AI Short-Term Trend Prediction Center",
+        "Probability distributions for 1 day, 3 days, 1 week, and 2 weeks—supported by connected evidence, never certainty.",
+    )
+    ticker = st.selectbox("Security", tickers, key="short_term_ticker")
+    try:
+        a, prices = cached_analysis(ticker, max_position, risk_per_trade)
+        metadata = cached_metadata(ticker)
+    except Exception as exc:
+        st.error(f"A source-backed short-term forecast could not be produced: {exc}")
+        return
+    freshness(a.as_of)
+
+    with st.expander("Configure weighted ensemble", expanded=False):
+        st.caption(
+            "Weights are normalized automatically. Modules without connected evidence cast a neutral vote and reduce effective coverage."
+        )
+        weight_cols = st.columns(4)
+        weights: dict[str, float] = {}
+        for index, (module, default) in enumerate(SHORT_TERM_WEIGHTS.items()):
+            weights[module] = weight_cols[index % 4].number_input(
+                module, min_value=0.0, max_value=100.0, value=default, step=1.0,
+                key=f"short_weight_{module.lower().replace(' ', '_').replace('/', '_')}",
+            )
+        total_weight = sum(weights.values())
+        if total_weight <= 0:
+            st.error("At least one ensemble module must have a positive weight.")
+            return
+        st.caption(f"Configured total: {total_weight:.0f}; normalized to 100% for calculation.")
+
+    technical_score = float(np.mean([
+        a.components["trend"].score,
+        a.components["momentum"].score,
+        a.components["relative_strength"].score,
+    ]))
+    technical_coverage = float(np.mean([
+        a.components["trend"].coverage,
+        a.components["momentum"].coverage,
+        a.components["relative_strength"].coverage,
+    ]))
+    module_specs = {
+        "Technical Analysis": (technical_score, technical_coverage, "Connected price/technical evidence"),
+        "Volume & Price Action": (a.components["volume"].score, a.components["volume"].coverage, "Connected price/volume evidence"),
+        "Options Flow": (50.0, 0.0, "Not connected—no options-flow vote"),
+        "News & Sentiment": (50.0, 0.0, "Not connected—no live news/social vote"),
+        "Fundamental Momentum": (a.components["fundamental"].score, a.components["fundamental"].coverage, "Metadata coverage varies"),
+        "Sector Rotation": (50.0, 0.0, "Sector-relative feed not connected"),
+        "Macro Economy": (a.components["macro"].score, a.components["macro"].coverage, "SPY trend proxy only"),
+        "AI / Statistical Model": (a.overall_score, 0.35, "Statistical proxy—not a trained ML model ensemble"),
+    }
+    module_rows: list[dict[str, Any]] = []
+    ensemble_score = 0.0
+    effective_coverage = 0.0
+    for module, raw_weight in weights.items():
+        score, coverage, status = module_specs[module]
+        normalized_weight = raw_weight / total_weight
+        effective_vote = 50 + (score - 50) * coverage
+        contribution = effective_vote * normalized_weight
+        ensemble_score += contribution
+        effective_coverage += coverage * normalized_weight
+        module_rows.append({
+            "Module": module,
+            "Configured Weight %": round(normalized_weight * 100, 1),
+            "Raw Score": round(score, 1),
+            "Coverage %": round(coverage * 100, 1),
+            "Coverage-adjusted Vote": round(effective_vote, 1),
+            "Weighted Contribution": round(contribution, 2),
+            "Status": status,
+        })
+    module_table = pd.DataFrame(module_rows)
+    forecast = short_term_probability_table(a, prices, ensemble_score, effective_coverage)
+    one_day = forecast.iloc[0]
+    two_weeks = forecast.iloc[-1]
+
+    if ensemble_score >= 65:
+        bias = "Strong Bullish"
+    elif ensemble_score >= 55:
+        bias = "Bullish"
+    elif ensemble_score <= 35:
+        bias = "Bearish"
+    elif ensemble_score <= 45:
+        bias = "Cautious / Bearish"
+    else:
+        bias = "Neutral"
+
+    hero_cols = st.columns(6)
+    hero_cols[0].metric("Current price", fmt(a.price, "price"))
+    hero_cols[1].metric("Overall bias", bias)
+    hero_cols[2].metric("1-day bull", fmt(one_day["Bull %"], "pct"))
+    hero_cols[3].metric("1-day confidence", fmt(one_day["Confidence %"], "pct"))
+    hero_cols[4].metric("2-week expected return", f"{two_weeks['Expected Return %']:+.2f}%")
+    hero_cols[5].metric("Connected evidence", fmt(effective_coverage * 100, "pct"))
+
+    gauge_col, probability_col = st.columns([0.8, 1.4])
+    with gauge_col:
+        st.plotly_chart(prediction_gauge(ensemble_score), use_container_width=True, key="short_term_gauge")
+    with probability_col:
+        st.plotly_chart(short_term_probability_chart(forecast), use_container_width=True, key="short_term_probabilities")
+    st.caption(
+        "Bull, neutral, and bear probabilities are a volatility-based statistical distribution conditioned on connected factor evidence. "
+        "They are estimates, not guarantees."
+    )
+
+    forecast_tab, evidence_tab, risk_tab, report_tab = st.tabs([
+        "Probability Forecast", "Evidence & Module Audit", "Risk Dashboard", "AI Report & Learning",
+    ])
+    with forecast_tab:
+        st.subheader("Probability matrix")
+        st.dataframe(forecast, column_config={
+            "Bull %": st.column_config.ProgressColumn("Bull %", min_value=0, max_value=100, format="%.1f%%"),
+            "Neutral %": st.column_config.ProgressColumn("Neutral %", min_value=0, max_value=100, format="%.1f%%"),
+            "Bear %": st.column_config.ProgressColumn("Bear %", min_value=0, max_value=100, format="%.1f%%"),
+            "Confidence %": st.column_config.ProgressColumn("Confidence %", min_value=0, max_value=100, format="%.1f%%"),
+            "Expected High": st.column_config.NumberColumn("Expected High", format="$%.2f"),
+            "Expected Low": st.column_config.NumberColumn("Expected Low", format="$%.2f"),
+        }, use_container_width=True, hide_index=True)
+        st.subheader("Trade plan")
+        trade_cols = st.columns(6)
+        for col, label, value in zip(
+            trade_cols,
+            ["Stop", "Current Price", "Target-1", "Target-2", "Target-3", "Trailing Stop"],
+            [a.stop_loss, a.price, a.target_1, a.target_2, a.target_3, a.trailing_stop],
+        ):
+            col.metric(label, fmt(value, "price"))
+        st.caption(
+            f"Reward/risk: {a.reward_risk:.2f}:1 · Kelly estimate: {a.kelly_fraction:.2f}% · "
+            f"Suggested position after configured caps: {a.recommended_position_size:.2f}%"
+        )
+
+    with evidence_tab:
+        meter_cols = st.columns(4)
+        meter_cols[0].metric("Technical score", f"{technical_score:.1f} / 100")
+        meter_cols[1].metric("Volume score", f"{a.components['volume'].score:.1f} / 100")
+        meter_cols[2].metric("News sentiment", "Not connected")
+        meter_cols[3].metric("Institutional activity", "Not connected")
+        st.subheader("Weighted ensemble audit")
+        st.dataframe(module_table, column_config={
+            "Coverage %": st.column_config.ProgressColumn("Coverage %", min_value=0, max_value=100, format="%.1f%%"),
+            "Coverage-adjusted Vote": st.column_config.ProgressColumn(
+                "Coverage-adjusted Vote", min_value=0, max_value=100, format="%.1f"
+            ),
+        }, use_container_width=True, hide_index=True)
+        st.subheader("AI explanation")
+        for name in ("trend", "momentum", "volume", "relative_strength", "fundamental", "macro"):
+            component = a.components[name]
+            st.markdown(f"**{name.replace('_', ' ').title()} — {component.score:.1f}/100**")
+            for reason in component.reasons:
+                st.markdown(f'<div class="reason">{reason}</div>', unsafe_allow_html=True)
+        st.warning(
+            "Options flow, dark pools, dealer gamma, social sentiment, live news, sector rotation, and trained ML models are not connected. "
+            "Their absence lowers coverage rather than generating synthetic evidence."
+        )
+
+    with risk_tab:
+        risk_frame = short_term_risk_table(a, prices, metadata)
+        st.subheader("Risk dashboard")
+        st.dataframe(risk_frame, use_container_width=True, hide_index=True)
+        st.subheader("Price and volatility context")
+        st.plotly_chart(price_chart(prices.tail(252), f"{ticker} · latest 252 sessions"),
+                        use_container_width=True, key="short_term_price_context")
+        st.error(
+            "Expected range and drawdown are model estimates, not worst-case limits. Earnings, news, halts, and overnight gaps can exceed them."
+        )
+
+    with report_tab:
+        strongest = sorted(a.components.items(), key=lambda item: item[1].score, reverse=True)[:3]
+        weakest = sorted(a.components.items(), key=lambda item: item[1].score)[:3]
+        with st.expander("Executive summary", expanded=True):
+            st.markdown(
+                f"**{ticker}** has a source-aware short-term ensemble score of **{ensemble_score:.1f}/100** "
+                f"with an overall bias of **{bias}**. The 1-day distribution is "
+                f"**{one_day['Bull %']:.1f}% bull / {one_day['Neutral %']:.1f}% neutral / {one_day['Bear %']:.1f}% bear**. "
+                f"Only **{effective_coverage:.0%}** of configured weighted evidence is currently connected."
+            )
+        with st.expander("Bull case and bear case"):
+            st.markdown("**Bull case**")
+            for name, component in strongest:
+                st.markdown(f"- {name.replace('_', ' ').title()}: {component.reasons[0]}")
+            st.markdown("**Bear case / constraints**")
+            for name, component in weakest:
+                st.markdown(f"- {name.replace('_', ' ').title()}: {component.reasons[0]}")
+        with st.expander("Catalysts, institutional activity, and news"):
+            st.markdown(
+                "- Earnings timing is shown in the Risk Dashboard when the metadata source provides it.\n"
+                "- Federal Reserve, CPI/PPI, employment, GDP, geopolitical, analyst-change, and product-launch feeds are not connected.\n"
+                "- Dark-pool, options whale, insider, ETF-flow, and dealer-positioning feeds are not connected.\n"
+                "- Verify all catalysts independently before trading."
+            )
+        with st.expander("Continuous learning and prediction storage"):
+            st.markdown(
+                "Predictions can be stored for later outcome labeling in **Accuracy Lab**. Automated horizon closing, calibration analysis, "
+                "rolling back-tests, feature reweighting, and model retraining require a persistent scheduled pipeline and are not claimed here."
+            )
+            if st.button("Store all four prediction horizons", key="store_short_term_predictions"):
+                store = SignalStore()
+                inserted = 0
+                signal_date = datetime.now(timezone.utc).date().isoformat()
+                for _, row in forecast.iterrows():
+                    direction = max(("Bullish", row["Bull %"]), ("Sideways", row["Neutral %"]),
+                                    ("Bearish", row["Bear %"]), key=lambda item: item[1])[0]
+                    target = a.price * (1 + float(row["Expected Return %"]) / 100)
+                    if store.record({
+                        "signal_date": signal_date, "ticker": ticker, "strategy": "Short-Term Ensemble",
+                        "prediction": direction, "entry": a.price, "target": target, "stop": a.stop_loss,
+                        "confidence": float(row["Confidence %"]), "horizon_days": int(row["Days"]),
+                    }):
+                        inserted += 1
+                st.success(f"Stored {inserted} new horizon predictions. Existing same-day horizons were not duplicated.")
+
+        feature_status = pd.DataFrame([
+            {"Evidence family": "Price/technical", "Connected": "Yes", "Coverage": "EMA 9/20/50/60/100/200, SMA200, MACD, RSI, ADX, ATR, RVOL, returns, volatility, 20-day highs/lows"},
+            {"Evidence family": "Advanced technical", "Connected": "Partial", "Coverage": "Stochastic RSI, VWAP/anchored VWAP, SuperTrend, Ichimoku, Bollinger/Keltner/Donchian, volume profile, BOS/CHOCH, Elliott, Wyckoff, Darvas, pivots, Fibonacci not yet implemented"},
+            {"Evidence family": "Fundamentals", "Connected": "Partial", "Coverage": "Yahoo company metadata; availability varies"},
+            {"Evidence family": "Macro", "Connected": "Partial", "Coverage": "SPY 200-day trend proxy only"},
+            {"Evidence family": "News/social", "Connected": "No", "Coverage": "No trusted live feed configured"},
+            {"Evidence family": "Institutional/options", "Connected": "No", "Coverage": "No licensed flow, dark-pool, gamma, insider, ETF, or 13F pipeline"},
+            {"Evidence family": "Machine learning", "Connected": "No", "Coverage": "Statistical proxy only; no trained XGBoost/LSTM/Transformer ensemble"},
+        ])
+        st.subheader("Source and feature coverage")
+        st.dataframe(feature_status, use_container_width=True, hide_index=True)
+
+
 def accuracy_page() -> None:
     header("Signal Accuracy & Feedback Loop", "Immutable predictions become labeled outcomes; performance is evaluated by strategy and regime, not headline accuracy alone.")
     store = SignalStore()
@@ -766,7 +1129,8 @@ with st.sidebar:
     st.caption("Probabilistic Equity Intelligence")
     page = st.radio(
         "Workspace",
-        ["AI Scanner", "Prediction Matrix", "Technical Terminal", "Accuracy Lab", "Reference Guide"],
+        ["AI Scanner", "Prediction Matrix", "Technical Terminal", "Accuracy Lab",
+         "Short-Term Prediction", "Reference Guide"],
     )
     st.divider()
     restore_browser_ticker_universe()
@@ -796,5 +1160,7 @@ elif page == "Technical Terminal":
     terminal_page(tickers, max_position, risk_per_trade)
 elif page == "Accuracy Lab":
     accuracy_page()
+elif page == "Short-Term Prediction":
+    short_term_prediction_page(tickers, max_position, risk_per_trade)
 else:
     reference_page()
